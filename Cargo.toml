@@ -1,0 +1,9 @@
+[package]
+name = "llm_scratch_rs"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "byte_pair"
+path = "byte_pair.rs"
+
