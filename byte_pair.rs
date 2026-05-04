@@ -1,6 +1,9 @@
 // CORRECTED BPE IMPLEMENTATION
+use regex_lite::Regex;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs;
+use std::io::Error;
 struct BytePair {
     vocab: HashMap<usize, String>,
     inverse_vocab: HashMap<String, usize>,
@@ -93,11 +96,11 @@ impl BytePair {
             .collect();
         // println!("seen: {:?}", seen);
 
-        let extra_char: Vec<char> = process_text
+        let extra_char: HashSet<char> = process_text
             .chars()
             .filter(|c| !seen.contains_key(&c.to_string()))
             .collect();
-        // println!("extra_char: {:?}", extra_char);
+        println!("extra_char: {:?}", extra_char);
 
         unique_chars.extend(extra_char);
         if !unique_chars.contains(&'Ġ') {
@@ -221,19 +224,117 @@ impl BytePair {
                 self.bpe_ranks.insert((id_a, id_b), rank);
                 rank += 1;
             } else {
-                println!("Skipping merge with unknown token: {}, {}", token_a, token_b);
+                println!(
+                    "Skipping merge with unknown token: {}, {}",
+                    token_a, token_b
+                );
             }
         }
 
         Ok(())
+    }
+
+    // Escapes regex metacharacters in a token string so it can be used as a literal in a regex pattern.
+    // e.g. "<|endoftext|>" → "<\|endoftext\|>" so the pipes aren't treated as alternation.
+    fn escape_regex(s: &str) -> String {
+        s.chars()
+            .flat_map(|c| {
+                if r"\.+*?()|[]{}^$".contains(c) {
+                    vec!['\\', c]
+                } else {
+                    vec![c]
+                }
+            })
+            .collect()
+    }
+
+    fn encode(
+        &mut self,
+        text: String,
+        allowed_special: Option<Vec<String>>,
+    ) -> Result<Vec<usize>, String> {
+        let mut tokens_ids: Vec<usize> = Vec::new();
+        if let Some(allowed_special) = allowed_special {
+            let escaped: Vec<String> = allowed_special.iter().map(|t| Self::escape_regex(t)).collect();
+            let special_pattern = escaped.join("|");
+            println!("special_pattern: {:?}", special_pattern);
+            let mut last_index = 0;
+            let re = Regex::new(&special_pattern).expect("Invalid regex pattern");
+            for mat_chg in re.find_iter(&text) {
+                let prefix = &text[last_index..mat_chg.start()];
+                if !prefix.is_empty() {
+                    tokens_ids.extend(self.encode(prefix.to_string(), None)?);
+                }
+                let special_token = mat_chg.as_str();
+
+                if self.inverse_vocab.contains_key(special_token) {
+                    tokens_ids.push(
+                        *self
+                            .inverse_vocab
+                            .get(special_token)
+                            .expect("Special token not found in vocab"),
+                    );
+                    last_index = mat_chg.end();
+                }
+            }
+            let remaining_text = &text[last_index..];
+            let mut disallowed_tokens = Vec::new();
+            for tok in self.inverse_vocab.keys() {
+                if tok.starts_with("<|")
+                    && tok.ends_with("|>")
+                    && remaining_text.contains(tok)
+                    && !allowed_special.contains(tok)
+                {
+                    disallowed_tokens.push(tok);
+                }
+            }
+            if !disallowed_tokens.is_empty() {
+                return Err(format!(
+                    "Disallowed special tokens encountered in text:{:?}",
+                    disallowed_tokens
+                ));
+            }
+        }
+        let mut tokens: Vec<String> = Vec::new();
+
+        for (id, tok) in text.split("\n").enumerate() {
+            if id > 0 {
+                tokens.push("\n".to_string())
+            }
+            let words = tok.split(" ");
+            for (id_x, word) in words.enumerate() {
+                if id_x == 0 && id > 0 {
+                    tokens.push(format!("Ġ{}", &word));
+                } else if id_x == 0 {
+                    tokens.push(word.to_string())
+                } else {
+                    tokens.push(format!("Ġ{}", &word));
+                }
+            }
+        }
+        for tok in tokens {
+            if self.inverse_vocab.contains_key(&tok) {
+                tokens_ids.push(*self.inverse_vocab.get(&tok).unwrap());
+            } else {
+                tokens_ids.extend(match self.tokenize_with_bpe(&tok) {
+                    Ok(tokens) => tokens,
+                    Err(_) => panic!("Failed to tokenize: {}", tok),
+                })
+            }
+        }
+        Ok(tokens_ids)
+    }
+
+    fn tokenize_with_bpe(&self, text: &str) -> Result<Vec<usize>, String> {
+        return Ok(Vec::new());
     }
 }
 
 fn main() {
     let mut bpe = BytePair::new();
     bpe.train(
-        "hello world , i come from hell",
-        300,
+        "hello world, i come from hell. hello again world, i come from a small village near the river. the world is full of words, and words become tokens when byte pair encoding learns repeated patterns. i come to learn rust, tokenizers, and language models from scratch. hello world again, this tokenizer should find pairs like he, ll, lo, world, come, from, and repeated space markers. the more text we give, the better the byte pair encoder can learn useful subword units instead of merging the entire sentence too quickly.",
+        350,
         Some(vec!["<|PAD|>".to_string(), "<|UNK|>".to_string()]),
     );
     println!("BytePair initialized successfully!");
