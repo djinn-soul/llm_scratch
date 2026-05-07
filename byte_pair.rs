@@ -261,41 +261,43 @@ impl BytePair {
         allowed_special: Option<Vec<String>>,
     ) -> Result<Vec<usize>, String> {
         let mut tokens_ids: Vec<usize> = Vec::new();
-        if let Some(allowed_special) = allowed_special {
-            let escaped: Vec<String> = allowed_special
-                .iter()
-                .map(|t| Self::escape_regex(t))
-                .collect();
+
+        if let Some(ref allowed_special) = allowed_special {
+            // Sort longest first to avoid partial matches (e.g. <|end|> before <|endoftext|>)
+            let mut sorted_special = allowed_special.clone();
+            sorted_special.sort_by_key(|t| std::cmp::Reverse(t.len()));
+
+            // Build regex pattern from escaped special tokens
+            let escaped: Vec<String> = sorted_special.iter().map(|t| Self::escape_regex(t)).collect();
             let special_pattern = escaped.join("|");
-            println!("special_pattern: {:?}", special_pattern);
-            let mut last_index = 0;
             let re = Regex::new(&special_pattern).expect("Invalid regex pattern");
+
+            let mut last_index = 0;
             for mat_chg in re.find_iter(&text) {
+                // Encode plain text before this special token
                 let prefix = &text[last_index..mat_chg.start()];
                 if !prefix.is_empty() {
                     tokens_ids.extend(self.encode(prefix.to_string(), None)?);
                 }
-                let special_token = mat_chg.as_str();
 
-                if self.inverse_vocab.contains_key(special_token) {
-                    tokens_ids.push(
-                        *self
-                            .inverse_vocab
-                            .get(special_token)
-                            .expect("Special token not found in vocab"),
-                    );
-                    last_index = mat_chg.end();
-                }
+                // Look up special token id, error if not in vocab
+                let special_token = mat_chg.as_str();
+                let id = self.inverse_vocab.get(special_token)
+                    .ok_or_else(|| format!("Special token '{}' not found in vocabulary", special_token))?;
+                tokens_ids.push(*id);
+                last_index = mat_chg.end();
             }
+
+            // Check remaining text for disallowed special tokens
             let remaining_text = &text[last_index..];
             let mut disallowed_tokens = Vec::new();
             for tok in self.inverse_vocab.keys() {
                 if tok.starts_with("<|")
                     && tok.ends_with("|>")
-                    && remaining_text.contains(tok)
+                    && remaining_text.contains(tok.as_str())
                     && !allowed_special.contains(tok)
                 {
-                    disallowed_tokens.push(tok);
+                    disallowed_tokens.push(tok.clone());
                 }
             }
             if !disallowed_tokens.is_empty() {
@@ -304,24 +306,33 @@ impl BytePair {
                     disallowed_tokens
                 ));
             }
-        }
-        let mut tokens: Vec<String> = Vec::new();
 
+            // Encode any remaining plain text after last special token
+            if !remaining_text.is_empty() {
+                tokens_ids.extend(self.encode(remaining_text.to_string(), None)?);
+            }
+            return Ok(tokens_ids);
+        }
+
+        // Split text on newlines, prepend Ġ to words following a space
+        let mut tokens: Vec<String> = Vec::new();
         for (id, tok) in text.split("\n").enumerate() {
             if id > 0 {
-                tokens.push("\n".to_string())
+                tokens.push("\n".to_string());
             }
             let words = tok.split(" ");
             for (id_x, word) in words.enumerate() {
                 if id_x == 0 && id > 0 {
                     tokens.push(format!("Ġ{}", &word));
                 } else if id_x == 0 {
-                    tokens.push(word.to_string())
+                    tokens.push(word.to_string());
                 } else {
                     tokens.push(format!("Ġ{}", &word));
                 }
             }
         }
+
+        // Map each token to its id; unknown tokens go through BPE
         for tok in tokens {
             if self.inverse_vocab.contains_key(&tok) {
                 tokens_ids.push(*self.inverse_vocab.get(&tok).unwrap());
@@ -329,7 +340,7 @@ impl BytePair {
                 tokens_ids.extend(match self.tokenize_with_bpe(&tok) {
                     Ok(tokens) => tokens,
                     Err(_) => panic!("Failed to tokenize: {}", tok),
-                })
+                });
             }
         }
         Ok(tokens_ids)
