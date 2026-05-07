@@ -365,8 +365,9 @@ impl BytePair {
             })
             .collect::<Result<Vec<usize>, _>>()?;
 
-        if !self.bpe_ranks.is_empty() {
-            // GPT-2 path: use bpe_merges (id pairs) to greedily merge
+        // If we haven't loaded OpenAI's GPT-2 merges, use custom training approach
+        if self.bpe_ranks.is_empty() {
+            // Custom training path: use bpe_merges (id pairs) to greedily merge
             let mut can_merge: bool = true;
             while can_merge && tokens.len() > 1 {
                 can_merge = false;
@@ -394,7 +395,7 @@ impl BytePair {
             return Ok(tokens);
         }
 
-        // Custom training path: use bpe_ranks (string pairs) to merge by priority
+        // GPT-2 path: use bpe_ranks (string pairs) to merge by priority
         // Convert token ids back to strings for rank-based merging
         let mut symbols: Vec<String> = tokens
             .iter()
@@ -614,5 +615,11 @@ fn main() {
     println!("Number of characters: {}", input_text.chars().count());
     println!("Number of token IDs: {}", tokens_with_special.len());
 
-    println!("Decoded: {}", bpe.decode(tokens_with_special).unwrap());
+    for i in &tokens_with_special {
+        println!(
+            "{}",
+            format!("id: {}--> {}", i, bpe.decode(vec![*i]).unwrap())
+        );
+    }
+    println!("Decoded: {}", bpe.decode(tokens_with_special.clone()).unwrap());
 }
