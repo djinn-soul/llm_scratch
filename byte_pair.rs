@@ -354,7 +354,11 @@ impl BytePair {
     }
 
     fn tokenize_with_bpe(&self, text: &str) -> Result<Vec<usize>, String> {
-        // Step 1: convert each character to its token id
+        // ── STEP 1: Split text into characters, look up each char's ID ──────────
+        // Example: token = "Ġlow"
+        //   chars  →  ['Ġ', 'l', 'o', 'w']
+        //   IDs    →  [256, 108, 111, 119]   (whatever ids were assigned during training)
+        // If any character is missing from vocab, we error immediately.
         let mut tokens: Vec<usize> = text
             .chars()
             .map(|c| {
@@ -365,9 +369,34 @@ impl BytePair {
             })
             .collect::<Result<Vec<usize>, _>>()?;
 
-        // If we haven't loaded OpenAI's GPT-2 merges, use custom training approach
+        // ── DECISION: which merge strategy to use? ───────────────────────────────
+        // bpe_ranks is only populated when loading GPT-2 vocab (load_vocab_and_merges_from_llm).
+        // bpe_merges is only populated during custom training (train).
+        // So: empty bpe_ranks → we trained our own model → use bpe_merges path.
         if self.bpe_ranks.is_empty() {
-            // Custom training path: use bpe_merges (id pairs) to greedily merge
+            // ── CUSTOM TRAINING PATH ─────────────────────────────────────────────
+            // bpe_merges stores: (id_a, id_b) → merged_id
+            // Example after training: (108, 111) → 260  meaning "l"+"o" → "lo"
+            //
+            // We scan left-to-right, merge any known pair on the spot, then repeat
+            // until no more pairs can be merged.
+            //
+            // Round 1 on [256, 108, 111, 119]  ("Ġ","l","o","w"):
+            //   i=0: pair (256,108) → not in bpe_merges → keep 256, i=1
+            //   i=1: pair (108,111) → in bpe_merges! → push 260 ("lo"), i=3, can_merge=true
+            //   i=3: last token 119 → carry over
+            //   tokens = [256, 260, 119]  ("Ġ","lo","w")
+            //
+            // Round 2 on [256, 260, 119]  ("Ġ","lo","w"):
+            //   i=0: pair (256,260) → in bpe_merges! → push 300 ("Ġlo"), i=2, can_merge=true
+            //   i=2: last token 119 → carry over
+            //   tokens = [300, 119]  ("Ġlo","w")
+            //
+            // Round 3 on [300, 119]  ("Ġlo","w"):
+            //   i=0: pair (300,119) → in bpe_merges! → push 350 ("Ġlow"), i=2
+            //   tokens = [350]  ("Ġlow")
+            //
+            // can_merge stays false in next round → loop exits → return [350]
             let mut can_merge: bool = true;
             while can_merge && tokens.len() > 1 {
                 can_merge = false;
@@ -376,17 +405,18 @@ impl BytePair {
                 while i < tokens.len() - 1 {
                     let pair: (usize, usize) = (tokens[i], tokens[i + 1]);
                     if self.bpe_merges.contains_key(&pair) {
-                        // Merge this pair into its combined token id
+                        // Pair found in merge table → replace both with merged id
                         let merge_token: usize = self.bpe_merges.get(&pair).unwrap().clone();
                         new_tokens.push(merge_token);
-                        i += 2;
-                        can_merge = true;
+                        i += 2; // skip both tokens (they became one)
+                        can_merge = true; // signal: run another pass
                     } else {
+                        // No merge for this pair → keep left token as-is
                         new_tokens.push(tokens[i]);
                         i += 1;
                     }
                 }
-                // Carry over last token if not consumed by a merge
+                // The inner loop stops at len-1; if last token wasn't consumed by merge, add it
                 if i < tokens.len() {
                     new_tokens.push(tokens[i])
                 }
@@ -395,8 +425,12 @@ impl BytePair {
             return Ok(tokens);
         }
 
-        // GPT-2 path: use bpe_ranks (string pairs) to merge by priority
-        // Convert token ids back to strings for rank-based merging
+        // ── GPT-2 PATH ───────────────────────────────────────────────────────────
+        // bpe_ranks stores: ("l", "o") → rank  where lower rank = higher priority merge
+        // Unlike custom path (id pairs), GPT-2 works on string symbols.
+        //
+        // STEP 2: convert ids back to string symbols so we can do rank-based merging
+        // Example: [256, 108, 111, 119] → ["Ġ", "l", "o", "w"]
         let mut symbols: Vec<String> = tokens
             .iter()
             .map(|&tok| {
@@ -408,17 +442,20 @@ impl BytePair {
             .collect::<Result<_, _>>()?;
 
         loop {
-            // Collect all adjacent symbol pairs
+            // STEP 3: collect every unique adjacent pair from current symbols
+            // Example: ["Ġ","l","o","w"] → pairs = {("Ġ","l"), ("l","o"), ("o","w")}
             let pairs: HashSet<(String, String)> = symbols
                 .windows(2)
                 .map(|w| (w[0].clone(), w[1].clone()))
                 .collect();
 
             if pairs.is_empty() {
-                break;
+                break; // single symbol left, nothing to merge
             }
 
-            // Find the pair with the lowest rank (highest priority)
+            // STEP 4: find pair with lowest rank (= was merged earliest in GPT-2 training)
+            // Example: bpe_ranks has ("l","o")→5, ("o","w")→99, ("Ġ","l")→200
+            //   → bigram = ("l","o") with rank 5  (lowest = highest priority)
             let mut min_rank = usize::MAX;
             let mut bigram: Option<(String, String)> = None;
             for p in &pairs {
@@ -430,27 +467,34 @@ impl BytePair {
                 }
             }
 
-            // No mergeable pair found — done
+            // If none of our pairs appear in bpe_ranks, no more merges possible
             let Some((p1, p2)) = bigram else {
                 break;
             };
 
-            // Replace all occurrences of (p1, p2) with merged string
+            // STEP 5: merge ALL occurrences of the winning pair in one pass
+            // Example: bigram=("l","o"), symbols=["Ġ","l","o","w"]
+            //   i=0: "Ġ" ≠ "l" → keep "Ġ", i=1
+            //   i=1: "l"=="l" and "o"=="o" → push "lo", i=3
+            //   i=3: "w" → keep "w", i=4
+            //   symbols = ["Ġ","lo","w"]
+            // Next loop iteration finds ("Ġ","lo") or ("lo","w") as next best pair, etc.
             let mut new_symbols: Vec<String> = Vec::new();
             let mut i: usize = 0;
             while i < symbols.len() {
                 if i + 1 < symbols.len() && symbols[i] == p1 && symbols[i + 1] == p2 {
-                    new_symbols.push(format!("{}{}", p1, p2));
+                    new_symbols.push(format!("{}{}", p1, p2)); // concatenate into merged symbol
                     i += 2;
                 } else {
                     new_symbols.push(symbols[i].clone());
                     i += 1;
                 }
             }
-            symbols = new_symbols;
+            symbols = new_symbols; // replace symbols with merged version, repeat loop
         }
 
-        // Convert final symbol strings back to token ids
+        // STEP 6: convert final merged symbols back to token ids
+        // Example: ["Ġlow"] → [350]
         let merged_ids: Vec<usize> = symbols
             .iter()
             .map(|tok| {
