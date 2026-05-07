@@ -4,6 +4,11 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
+
+// vocab: id -> token string (e.g. 65 -> "A")
+// inverse_vocab: token string -> id (e.g. "A" -> 65)
+// bpe_merges: (id_a, id_b) -> merged_id  (used during custom training)
+// bpe_ranks: (str_a, str_b) -> rank      (used when loading GPT-2 merges)
 struct BytePair {
     vocab: HashMap<usize, String>,
     inverse_vocab: HashMap<String, usize>,
@@ -11,6 +16,7 @@ struct BytePair {
     bpe_ranks: HashMap<(String, String), usize>,
 }
 
+// Serializable struct for saving/loading bpe_merges to JSON
 #[derive(serde::Serialize, Deserialize)]
 struct MergeEntry {
     pair: [usize; 2],
@@ -27,6 +33,7 @@ impl BytePair {
         }
     }
 
+    // Count adjacent token pairs and return the most/least frequent one
     fn find_freq_pair(&self, tokens: &Vec<usize>, mode: &str) -> Option<(usize, usize)> {
         let mut pair_count: HashMap<(usize, usize), usize> = HashMap::new();
         for t in tokens.windows(2) {
@@ -47,6 +54,8 @@ impl BytePair {
             _ => panic!("Invalid mode {}", mode),
         }
     }
+
+    // Replace every occurrence of pair_id in tokens with new_pair_id
     fn replace_pair(
         &mut self,
         tokens: &mut Vec<usize>,
@@ -69,8 +78,6 @@ impl BytePair {
     }
 
     fn train(&mut self, text: &str, vocab_size: usize, allowed_special: Option<Vec<String>>) {
-        let mut processed_text: Vec<String> = Vec::new();
-
         println!("Training BPE on text: {}", text);
         println!("Vocabulary size: {}", vocab_size);
 
@@ -78,6 +85,8 @@ impl BytePair {
             println!("Allowed special tokens: {:?}", special_tokens);
         }
 
+        // Replace spaces with Ġ (GPT-2 style), skip leading space
+        let mut processed_text: Vec<String> = Vec::new();
         for (i, item) in text.chars().enumerate() {
             if item == ' ' && i != 0 {
                 processed_text.push("Ġ".to_string());
@@ -85,22 +94,18 @@ impl BytePair {
                 processed_text.push(item.to_string());
             }
         }
-
         let process_text = processed_text.join("");
-        // println!("processed_text: {:?}", process_text);
 
-        // Correctly generate the first 256 Unicode scalar values
+        // Start with first 256 Unicode scalar values as base vocab
         let mut unique_chars: Vec<char> = (0..256u32).filter_map(std::char::from_u32).collect();
 
-        // println!("unique_chars count: {:?}", unique_chars.len());
-
+        // Find any chars in text not already in base vocab
         let seen: HashMap<String, usize> = unique_chars
             .iter()
             .cloned()
             .enumerate()
             .map(|(i, c)| (c.to_string(), i))
             .collect();
-        // println!("seen: {:?}", seen);
 
         let extra_char: HashSet<char> = process_text
             .chars()
@@ -108,16 +113,19 @@ impl BytePair {
             .collect();
         println!("extra_char: {:?}", extra_char);
 
+        // Add extra chars and ensure Ġ is in vocab
         unique_chars.extend(extra_char);
         if !unique_chars.contains(&'Ġ') {
             unique_chars.push('Ġ');
         }
 
+        // Populate vocab and inverse_vocab with base characters
         for (i, c) in unique_chars.iter().enumerate() {
             self.vocab.insert(i, c.to_string());
             self.inverse_vocab.insert(c.to_string(), i);
         }
 
+        // Add special tokens to vocab if provided
         if let Some(tokens) = allowed_special {
             for token in tokens {
                 if !self.inverse_vocab.contains_key(&token) {
@@ -130,6 +138,7 @@ impl BytePair {
 
         println!("self.vocab count: {:?}", self.vocab.len());
 
+        // Convert processed text to token id sequence
         let mut token_ids: Vec<usize> = process_text
             .chars()
             .map(|i| {
@@ -139,14 +148,9 @@ impl BytePair {
                     .expect("Token not found in vocab")
             })
             .collect();
-        // println!("token_ids: {:?}", token_ids);
-        // let pair = self.find_freq_pair(&token_ids, "most");
-        // println!("Most frequent pair: {:?}", pair);
+
+        // BPE training loop: repeatedly merge most frequent pair until vocab_size reached
         for new_id in self.vocab.len()..vocab_size {
-            // let pair = self.find_freq_pair(&token_ids, "most");
-            // if pair.is_none() {
-            //     break;
-            // }
             if let Some(pair) = self.find_freq_pair(&token_ids, "most") {
                 token_ids = self.replace_pair(&mut token_ids, &pair, new_id);
                 self.bpe_merges.insert(pair, new_id);
@@ -154,8 +158,8 @@ impl BytePair {
                 break;
             }
         }
-        // println!("final token_ids: {:?}", token_ids);
 
+        // Add merged tokens to vocab in order of their new ids
         let mut sorted_merges: Vec<_> = self.bpe_merges.iter().collect();
         sorted_merges.sort_by_key(|(_, &new_id)| new_id);
         for (pair, new_id) in sorted_merges {
@@ -170,8 +174,6 @@ impl BytePair {
         println!("self.vocab count: {:?}", self.vocab.len());
         println!("self.inverse_vocab count: {:?}", self.inverse_vocab.len());
         println!("self.bpe_merges count: {:?}", self.bpe_merges.len());
-        // println!("self.bpe_ranks: {:?}", self.bpe_ranks);
-        // println!("self.bpe_merges: {:?}", self.bpe_merges);
     }
 
     // Load pre-trained vocab and BPE merges from GPT-2 files.
@@ -182,10 +184,8 @@ impl BytePair {
         vocab_path: &str,
         bpe_merges_path: &str,
     ) -> Result<(), String> {
-        //load vocab from file
-
+        // Load vocab JSON: {"token_str": id, ...}
         let contents = fs::read_to_string(vocab_path).map_err(|e| e.to_string())?;
-
         let vocab_data_map: HashMap<String, usize> =
             serde_json::from_str(&contents).map_err(|e| e.to_string())?;
         for (token, id) in vocab_data_map {
@@ -193,6 +193,7 @@ impl BytePair {
             self.inverse_vocab.insert(token, id);
         }
 
+        // GPT-2 vocab doesn't have "\n" — map it to a fallback token id
         if !self.inverse_vocab.contains_key("\n") {
             let fallback_id = ["<|endoftext|>", "Ġ", ""]
                 .iter()
@@ -203,18 +204,19 @@ impl BytePair {
             self.vocab.insert(newline_id, "\n".to_string());
         }
 
-        // load merge pairs from file
+        // Load BPE merge file: each line is "token_a token_b", rank = line order
         let contents = fs::read_to_string(bpe_merges_path).map_err(|e| e.to_string())?;
-
         self.bpe_ranks = HashMap::new();
         let mut lines = contents.lines();
+
+        // Skip header line (starts with #)
         if let Some(first) = lines.next() {
             if !first.starts_with('#') {
                 println!("No header found: {}", first);
             }
         }
-        let mut rank: usize = 0;
 
+        let mut rank: usize = 0;
         for line in lines {
             let parts: Vec<&str> = line.split(' ').collect();
             if parts.len() != 2 {
@@ -223,6 +225,7 @@ impl BytePair {
             }
             let token_a = parts[0];
             let token_b = parts[1];
+            // Only store merge if both tokens exist in vocab
             if let (Some(&id_a), Some(&id_b)) = (
                 self.inverse_vocab.get(token_a),
                 self.inverse_vocab.get(token_b),
@@ -241,8 +244,8 @@ impl BytePair {
         Ok(())
     }
 
-    // Escapes regex metacharacters in a token string so it can be used as a literal in a regex pattern.
-    // e.g. "<|endoftext|>" → "<\|endoftext\|>" so the pipes aren't treated as alternation.
+    // Escapes regex metacharacters so special tokens can be used as literals in regex
+    // e.g. "<|endoftext|>" -> "<\|endoftext\|>"
     fn escape_regex(s: &str) -> String {
         s.chars()
             .flat_map(|c| {
@@ -267,8 +270,11 @@ impl BytePair {
             let mut sorted_special = allowed_special.clone();
             sorted_special.sort_by_key(|t| std::cmp::Reverse(t.len()));
 
-            // Build regex pattern from escaped special tokens
-            let escaped: Vec<String> = sorted_special.iter().map(|t| Self::escape_regex(t)).collect();
+            // Build regex pattern from escaped special tokens joined by |
+            let escaped: Vec<String> = sorted_special
+                .iter()
+                .map(|t| Self::escape_regex(t))
+                .collect();
             let special_pattern = escaped.join("|");
             let re = Regex::new(&special_pattern).expect("Invalid regex pattern");
 
@@ -280,15 +286,16 @@ impl BytePair {
                     tokens_ids.extend(self.encode(prefix.to_string(), None)?);
                 }
 
-                // Look up special token id, error if not in vocab
+                // Look up special token id — error if not registered in vocab
                 let special_token = mat_chg.as_str();
-                let id = self.inverse_vocab.get(special_token)
-                    .ok_or_else(|| format!("Special token '{}' not found in vocabulary", special_token))?;
+                let id = self.inverse_vocab.get(special_token).ok_or_else(|| {
+                    format!("Special token '{}' not found in vocabulary", special_token)
+                })?;
                 tokens_ids.push(*id);
                 last_index = mat_chg.end();
             }
 
-            // Check remaining text for disallowed special tokens
+            // Check remaining text for disallowed special tokens (not in allowed_special)
             let remaining_text = &text[last_index..];
             let mut disallowed_tokens = Vec::new();
             for tok in self.inverse_vocab.keys() {
@@ -307,14 +314,14 @@ impl BytePair {
                 ));
             }
 
-            // Encode any remaining plain text after last special token
+            // Encode any remaining plain text after the last special token
             if !remaining_text.is_empty() {
                 tokens_ids.extend(self.encode(remaining_text.to_string(), None)?);
             }
             return Ok(tokens_ids);
         }
 
-        // Split text on newlines, prepend Ġ to words following a space
+        // Split on newlines, prepend Ġ to words after a space (GPT-2 style)
         let mut tokens: Vec<String> = Vec::new();
         for (id, tok) in text.split("\n").enumerate() {
             if id > 0 {
@@ -332,7 +339,7 @@ impl BytePair {
             }
         }
 
-        // Map each token to its id; unknown tokens go through BPE
+        // Map each token to its vocab id; unknown tokens go through BPE merging
         for tok in tokens {
             if self.inverse_vocab.contains_key(&tok) {
                 tokens_ids.push(*self.inverse_vocab.get(&tok).unwrap());
@@ -347,6 +354,7 @@ impl BytePair {
     }
 
     fn tokenize_with_bpe(&self, text: &str) -> Result<Vec<usize>, String> {
+        // Step 1: convert each character to its token id
         let mut tokens: Vec<usize> = text
             .chars()
             .map(|c| {
@@ -358,6 +366,7 @@ impl BytePair {
             .collect::<Result<Vec<usize>, _>>()?;
 
         if !self.bpe_ranks.is_empty() {
+            // GPT-2 path: use bpe_merges (id pairs) to greedily merge
             let mut can_merge: bool = true;
             while can_merge && tokens.len() > 1 {
                 can_merge = false;
@@ -366,6 +375,7 @@ impl BytePair {
                 while i < tokens.len() - 1 {
                     let pair: (usize, usize) = (tokens[i], tokens[i + 1]);
                     if self.bpe_merges.contains_key(&pair) {
+                        // Merge this pair into its combined token id
                         let merge_token: usize = self.bpe_merges.get(&pair).unwrap().clone();
                         new_tokens.push(merge_token);
                         i += 2;
@@ -375,14 +385,17 @@ impl BytePair {
                         i += 1;
                     }
                 }
+                // Carry over last token if not consumed by a merge
                 if i < tokens.len() {
                     new_tokens.push(tokens[i])
                 }
                 tokens = new_tokens;
-                return Ok(tokens);
             }
+            return Ok(tokens);
         }
 
+        // Custom training path: use bpe_ranks (string pairs) to merge by priority
+        // Convert token ids back to strings for rank-based merging
         let mut symbols: Vec<String> = tokens
             .iter()
             .map(|&tok| {
@@ -394,6 +407,7 @@ impl BytePair {
             .collect::<Result<_, _>>()?;
 
         loop {
+            // Collect all adjacent symbol pairs
             let pairs: HashSet<(String, String)> = symbols
                 .windows(2)
                 .map(|w| (w[0].clone(), w[1].clone()))
@@ -403,9 +417,9 @@ impl BytePair {
                 break;
             }
 
+            // Find the pair with the lowest rank (highest priority)
             let mut min_rank = usize::MAX;
             let mut bigram: Option<(String, String)> = None;
-
             for p in &pairs {
                 if let Some(&rank) = self.bpe_ranks.get(p) {
                     if rank < min_rank {
@@ -415,10 +429,12 @@ impl BytePair {
                 }
             }
 
+            // No mergeable pair found — done
             let Some((p1, p2)) = bigram else {
                 break;
             };
 
+            // Replace all occurrences of (p1, p2) with merged string
             let mut new_symbols: Vec<String> = Vec::new();
             let mut i: usize = 0;
             while i < symbols.len() {
@@ -433,6 +449,7 @@ impl BytePair {
             symbols = new_symbols;
         }
 
+        // Convert final symbol strings back to token ids
         let merged_ids: Vec<usize> = symbols
             .iter()
             .map(|tok| {
@@ -449,16 +466,21 @@ impl BytePair {
     fn decode(&self, token_ids: Vec<usize>) -> Result<String, String> {
         let mut decoded = String::new();
         for id in &token_ids {
+            // Look up token string for each id
             let token = self
                 .vocab
                 .get(id)
                 .ok_or_else(|| format!("unknown id: {id}"))?;
             if token == "\n" {
+                // Newline: add space if needed for readability
                 if !decoded.ends_with(" ") && decoded.len() > 0 {
                     decoded.push_str(" ");
                 }
             } else if token.starts_with("Ġ") {
-                decoded.push_str(&format!(" {}", &token[1..]));
+                // Ġ prefix means space before this word
+                // "Ġ" is a special character, so we need to skip it with in rust it is 2 by
+                // in python it is unicode 1: thing will work
+                decoded.push_str(&format!(" {}", &token['Ġ'.len_utf8()..]));
             } else {
                 decoded.push_str(token);
             }
@@ -466,9 +488,15 @@ impl BytePair {
         Ok(decoded)
     }
 
+    // Save vocab and bpe_merges to JSON files for later loading
     fn save_vocab_and_merges(&self, vocab_path: &str, bpe_merges_path: &str) -> Result<(), String> {
-        fs::write(vocab_path, serde_json::to_string(&self.vocab).unwrap());
+        fs::write(
+            vocab_path,
+            serde_json::to_string(&self.vocab).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
 
+        // Convert (usize, usize) keys to serializable [usize; 2] arrays
         let merges_list: Vec<MergeEntry> = self
             .bpe_merges
             .iter()
@@ -486,6 +514,7 @@ impl BytePair {
         Ok(())
     }
 
+    // Load previously saved vocab and bpe_merges from JSON files
     fn load_vocab_and_merges(
         &mut self,
         vocab_path: &str,
@@ -500,11 +529,13 @@ impl BytePair {
         let load_bpe_merges_data: Vec<MergeEntry> =
             serde_json::from_str(&bpe_merges_file_data).unwrap();
 
+        // Populate vocab and inverse_vocab
         for (id, token) in load_vocab_data {
             self.vocab.insert(id, token.clone());
             self.inverse_vocab.insert(token, id);
         }
 
+        // Convert [usize; 2] pairs back to (usize, usize) keys
         for merge_entry in load_bpe_merges_data {
             self.bpe_merges.insert(
                 (merge_entry.pair[0], merge_entry.pair[1]),
@@ -516,6 +547,7 @@ impl BytePair {
     }
 }
 
+// Download file from url only if it doesn't already exist at dest_path
 fn download_file_if_not_present(url: &str, dest_path: &str) {
     if fs::metadata(dest_path).is_ok() {
         println!("File already exists: {}", dest_path);
@@ -529,11 +561,11 @@ fn download_file_if_not_present(url: &str, dest_path: &str) {
             return;
         }
     };
-    println!("Downloading from url Done: {}", response.status());
+    println!("Download status: {}", response.status());
     let bytes = match response.bytes() {
         Ok(bytes) => bytes,
         Err(e) => {
-            println!("Failed to download from url: {}", e);
+            println!("Failed to read response bytes: {}", e);
             return;
         }
     };
@@ -545,33 +577,42 @@ fn download_file_if_not_present(url: &str, dest_path: &str) {
 
 fn main() {
     let mut bpe = BytePair::new();
-    // bpe.train(
-    //     "hello world, i come from hell. hello again world, i come from a small village near the river. the world is full of words, and words become tokens when byte pair encoding learns repeated patterns. i come to learn rust, tokenizers, and language models from scratch. hello world again, this tokenizer should find pairs like he, ll, lo, world, come, from, and repeated space markers. the more text we give, the better the byte pair encoder can learn useful subword units instead of merging the entire sentence too quickly.",
-    //     350,
-    //     Some(vec!["<|PAD|>".to_string(), "<|UNK|>".to_string()]),
-    // );
     let allowed_special = Some(vec!["<|endoftext|>".to_string()]);
+
+    // Download training text if not already present
     let url = "https://raw.githubusercontent.com/rasbt/LLMs-from-scratch/main/ch02/01_main-chapter-code/the-verdict.txt";
     let _ = download_file_if_not_present(url, "./the-verdict.txt");
+
     let text = fs::read_to_string("./the-verdict.txt").expect("Failed to read file");
     println!("BytePair initialized successfully!");
+
+    // Train BPE on the text with target vocab size 1000
     bpe.train(&text, 1000, allowed_special);
     println!("BytePair trained successfully!");
+
+    // Save trained vocab and merges to disk
     bpe.save_vocab_and_merges("./vocab.json", "./bpe_merges.json")
         .unwrap();
     println!("Vocab: {}", bpe.vocab.len());
     println!("merges: {}", bpe.bpe_merges.len());
+
     let input_text = "Jack embraced beauty through art and life.<|endoftext|> ";
 
+    // Encode without special token handling — <|endoftext|> split into chars
     let tokens = bpe.encode(input_text.to_string(), None).unwrap();
     println!("{:?}", tokens);
 
-    let tokens_with_special = bpe.encode(
-        input_text.to_string(),
-        Some(vec!["<|endoftext|>".to_string()]),
-    ).unwrap();
+    // Encode with special token handling — <|endoftext|> becomes single id
+    let tokens_with_special = bpe
+        .encode(
+            input_text.to_string(),
+            Some(vec!["<|endoftext|>".to_string()]),
+        )
+        .unwrap();
     println!("{:?}", tokens_with_special);
 
-    println!("Number of characters: {}", input_text.len());
+    println!("Number of characters: {}", input_text.chars().count());
     println!("Number of token IDs: {}", tokens_with_special.len());
+
+    println!("Decoded: {}", bpe.decode(tokens_with_special).unwrap());
 }
