@@ -667,3 +667,120 @@ fn main() {
     }
     println!("Decoded: {}", bpe.decode(tokens_with_special.clone()).unwrap());
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// HOW BYTE PAIR ENCODING (BPE) WORKS — FULL WALKTHROUGH WITH EXAMPLE
+// ════════════════════════════════════════════════════════════════════════════
+//
+// INPUT TEXT: "low lower newest"
+//
+// ── PHASE 1: PRE-PROCESSING ──────────────────────────────────────────────────
+// Spaces are replaced with special character Ġ (GPT-2 style).
+// Leading space is dropped. Each word boundary becomes visible.
+//
+//   "low lower newest"
+//    → "lowĠlowerĠnewest"
+//
+// Why Ġ? So the tokenizer knows "low" at start of text vs "Ġlow" after a space
+// are different surface forms, just like GPT-2 does.
+//
+// ── PHASE 2: BASE VOCABULARY ─────────────────────────────────────────────────
+// Start with every Unicode character 0..255 as individual tokens.
+// Each char gets an ID:
+//
+//   ID 101 → 'e'
+//   ID 108 → 'l'
+//   ID 111 → 'o'
+//   ID 119 → 'w'
+//   ID 110 → 'n'
+//   ID 115 → 's'
+//   ID 116 → 't'
+//   ID 114 → 'r'
+//   ID 256 → 'Ġ'   (added because not in 0..255)
+//
+// Also add special tokens like "<|endoftext|>" → ID 257
+//
+// ── PHASE 3: INITIAL TOKEN ID SEQUENCE ──────────────────────────────────────
+// Convert the processed text character by character to IDs:
+//
+//   "lowĠlowerĠnewest"
+//    → [108, 111, 119, 256, 108, 111, 119, 101, 114, 256, 110, 101, 119, 101, 115, 116]
+//    →  l    o    w   Ġ    l    o    w    e    r   Ġ    n    e    w    e    s    t
+//
+// ── PHASE 4: BPE TRAINING LOOP ───────────────────────────────────────────────
+// Repeatedly find the MOST FREQUENT adjacent pair and merge it into a new token.
+// Each merge creates one new ID and shrinks the sequence.
+//
+// ITERATION 1:
+//   Count all pairs:
+//     (108,111)="lo" appears 2 times  ← most frequent
+//     (111,119)="ow" appears 2 times
+//     (119,256)="wĠ" appears 1 time
+//     ... etc
+//   Winner: (108,111) → new ID 258, new token "lo"
+//   Replace ALL occurrences:
+//     [108,111,119,256, 108,111,119,101,114, 256,110,101,119,101,115,116]
+//      → [258,119,256, 258,119,101,114, 256,110,101,119,101,115,116]
+//         lo  w  Ġ    lo  w  e  r      Ġ  n  e  w  e  s  t
+//   Record: bpe_merges[(108,111)] = 258
+//
+// ITERATION 2:
+//   Count pairs in new sequence:
+//     (258,119)="low" appears 2 times  ← most frequent
+//   Winner: (258,119) → new ID 259, new token "low"
+//   Replace:
+//     [258,119,256, 258,119,101,114, 256,110,101,119,101,115,116]
+//      → [259,256, 259,101,114, 256,110,101,119,101,115,116]
+//         low Ġ    low e   r    Ġ   n   e   w   e   s   t
+//   Record: bpe_merges[(258,119)] = 259
+//
+// ITERATION 3:
+//   (259,101)="lowe" appears 1 time, (101,114)="er" appears 1 time, ...
+//   Winner: say (101,114)="er" → new ID 260
+//   ... and so on until vocab reaches target size (e.g. 1000)
+//
+// ── PHASE 5: ENCODING A NEW TEXT ─────────────────────────────────────────────
+// Given: "low newest"  (never seen exactly during training)
+//
+// Step A — split into words with Ġ prefix:
+//   ["low", "Ġnewest"]
+//
+// Step B — for each word, check if whole word is in vocab:
+//   "low"     → ID 259  (yes! learned during training)
+//   "Ġnewest" → not in vocab → call tokenize_with_bpe("Ġnewest")
+//
+// Step C — tokenize_with_bpe("Ġnewest"):
+//   chars → ['Ġ','n','e','w','e','s','t'] → IDs [256,110,101,119,101,115,116]
+//   Round 1 scan pairs:
+//     (256,110)="Ġn" → not in bpe_merges → keep 256
+//     (110,101)="ne" → not in bpe_merges → keep 110
+//     (101,119)="ew" → not in bpe_merges → keep 101
+//     (119,101)="we" → not in bpe_merges → keep 119
+//     (101,115)="es" → in bpe_merges! (if trained) → push merged id
+//     ... continues until no more merges possible
+//   Result: e.g. [256, 110, 101, 119, 260, 116]  ("Ġ","n","e","w","es","t")
+//
+// Step D — final token ids: [259, 256, 110, 101, 119, 260, 116]
+//
+// ── PHASE 6: DECODING ────────────────────────────────────────────────────────
+// Convert IDs back to strings:
+//   259 → "low"
+//   256 → "Ġ"  → becomes " " (space before next word)
+//   110 → "n"
+//   101 → "e"
+//   119 → "w"
+//   260 → "es"
+//   116 → "t"
+//   Result: "low newest"  ✓
+//
+// ── SUMMARY: DATA STRUCTURES ─────────────────────────────────────────────────
+//
+//   vocab          HashMap<usize, String>         258 → "lo"
+//   inverse_vocab  HashMap<String, usize>         "lo" → 258
+//   bpe_merges     HashMap<(usize,usize), usize>  (108,111) → 258   ← custom training
+//   bpe_ranks      HashMap<(String,String), usize> ("l","o") → 5    ← GPT-2 loading
+//
+//   bpe_merges is used during ENCODING (tokenize_with_bpe, custom path)
+//   bpe_ranks  is used during ENCODING (tokenize_with_bpe, GPT-2 path)
+//   Only one is populated at a time depending on how the model was loaded.
+// ════════════════════════════════════════════════════════════════════════════
