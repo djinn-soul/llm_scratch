@@ -666,6 +666,16 @@ fn main() {
         );
     }
     println!("Decoded: {}", bpe.decode(tokens_with_special.clone()).unwrap());
+
+
+    let mut bpe1 = BytePair::new();
+    println!("Loading vocab and merges...");
+    bpe1.load_vocab_and_merges("./vocab.json", "./bpe_merges.json").unwrap();
+    println!("Vocab: {}", bpe1.vocab.len());
+    println!("merges: {}", bpe1.bpe_merges.len());
+    
+    println!("Decoded Loaded: {}", bpe1.decode(tokens_with_special.clone()).unwrap());
+
 }
 
 // ════════════════════════════════════════════════════════════════════════════
