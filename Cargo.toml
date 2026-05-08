@@ -9,7 +9,7 @@ path = "bpe.rs"
 
 [[bin]]
 name = "sentence_piece"
-path = "sentencepiece.rs"
+path = "sentence_piece.rs"
 
 
 [dependencies]
