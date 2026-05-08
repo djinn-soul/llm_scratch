@@ -7,6 +7,11 @@ edition = "2021"
 name = "byte_pair"
 path = "bpe.rs"
 
+[[bin]]
+name = "sentence_piece"
+path = "sentencepiece.rs"
+
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
