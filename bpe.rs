@@ -1,4 +1,5 @@
 // CORRECTED BPE IMPLEMENTATION
+// https://sebastianraschka.com/blog/2025/bpe-from-scratch.html
 use regex_lite::Regex;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -226,10 +227,8 @@ impl BytePair {
             let token_a = parts[0];
             let token_b = parts[1];
             // Only store merge if both tokens exist in vocab
-            if let (Some(&id_a), Some(&id_b)) = (
-                self.inverse_vocab.get(token_a),
-                self.inverse_vocab.get(token_b),
-            ) {
+            if self.inverse_vocab.contains_key(token_a) && self.inverse_vocab.contains_key(token_b)
+            {
                 self.bpe_ranks
                     .insert((token_a.to_string(), token_b.to_string()), rank);
                 rank += 1;
@@ -665,17 +664,57 @@ fn main() {
             format!("id: {}--> {}", i, bpe.decode(vec![*i]).unwrap())
         );
     }
-    println!("Decoded: {}", bpe.decode(tokens_with_special.clone()).unwrap());
-
+    println!(
+        "Decoded: {}",
+        bpe.decode(tokens_with_special.clone()).unwrap()
+    );
 
     let mut bpe1 = BytePair::new();
     println!("Loading vocab and merges...");
-    bpe1.load_vocab_and_merges("./vocab.json", "./bpe_merges.json").unwrap();
+    bpe1.load_vocab_and_merges("./vocab.json", "./bpe_merges.json")
+        .unwrap();
     println!("Vocab: {}", bpe1.vocab.len());
     println!("merges: {}", bpe1.bpe_merges.len());
-    
-    println!("Decoded Loaded: {}", bpe1.decode(tokens_with_special.clone()).unwrap());
 
+    println!(
+        "Decoded Loaded: {}",
+        bpe1.decode(tokens_with_special.clone()).unwrap()
+    );
+
+    // Download GPT-2 vocab and merge files if not already present
+    // Python equivalent:
+    //   files_to_download = {
+    //     "https://.../vocab.bpe": "vocab.bpe",
+    //     "https://.../encoder.json": "encoder.json"
+    //   }
+    //   for url, filename in files_to_download.items():
+    //       paths[filename] = download_file_if_absent(url, filename)
+    let gpt2_files = [
+        (
+            "https://openaipublic.blob.core.windows.net/gpt-2/models/124M/vocab.bpe",
+            "./vocab.bpe",
+        ),
+        (
+            "https://openaipublic.blob.core.windows.net/gpt-2/models/124M/encoder.json",
+            "./encoder.json",
+        ),
+    ];
+    for (url, dest) in &gpt2_files {
+        download_file_if_not_present(url, dest);
+    }
+
+    // Load GPT-2 vocab and merges, then encode with it
+    let mut bpe_gpt2 = BytePair::new();
+    bpe_gpt2
+        .load_vocab_and_merges_from_llm("./encoder.json", "./vocab.bpe")
+        .unwrap();
+    println!("GPT-2 vocab size: {}", bpe_gpt2.vocab.len());
+    println!("GPT-2 bpe_ranks size: {}", bpe_gpt2.bpe_ranks.len());
+    let input_text = "This is some text";
+    println!(
+        "{:?}",
+        bpe_gpt2.encode(input_text.to_string(), None).unwrap()
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════════
