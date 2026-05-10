@@ -11,7 +11,7 @@ pub struct SentencePieceTokenizer {
 impl SentencePieceTokenizer {
     const MAX_SUBSTR_LEN: usize = 16;
     const SEED_VOCAB_MULTIPLIER: usize = 16;
-
+    const SPECIAL_TOKEN_SPACE_REPLACE: &str = "▁";
     pub fn new() -> Self {
         Self {
             vocab: HashMap::new(),
@@ -28,9 +28,11 @@ impl SentencePieceTokenizer {
     ) -> HashMap<String, f64> {
         // _marked word boundary: hello world -> _hello_world
 
+        let marker = Self::SPECIAL_TOKEN_SPACE_REPLACE;
+
         let marked_text = text
             .split_whitespace()
-            .map(|w| format!("_{w}"))
+            .map(|w| format!("{marker}{w}"))
             .collect::<Vec<_>>()
             .join("");
 
@@ -76,6 +78,54 @@ impl SentencePieceTokenizer {
             .collect()
     }
 
+    fn viterbi(&self, text: &str) -> Vec<String> {
+        let chars: Vec<char> = text.chars().collect();
+
+        let n = chars.len();
+
+        let mut dp = vec![f64::NEG_INFINITY; n + 1];
+        let mut bck = vec![0usize; n + 1];
+        dp[0] = 0.0;
+        for i in 1..=n {
+            for j in 0..i {
+                let substr: String = chars[j..i].iter().collect();
+                if let Some(&lp) = self.vocab.get(&substr) {
+                    let score = dp[j] + lp;
+                    if score > dp[i] {
+                        dp[i] = score;
+                        bck[i] = j;
+                    }
+                }
+            }
+        }
+        let mut tokens = Vec::new();
+        let mut i = n;
+        //backtrack to recover the tokens and best segmentation
+        while i > 0 {
+            let j = bck[i];
+            tokens.push(chars[j..i].iter().collect());
+            i = j;
+        }
+        tokens.reverse();
+        tokens
+    }
+
+    fn em_step(&self, sentesnce: &[&str]) -> HashMap<String, f64> {
+        let mut counts: HashMap<String, f64> = HashMap::new();
+        for sent in sentesnce {
+            // tokenizing using viterbi for all sentences to probale tokens
+            let tokens = self.viterbi(sent);
+            for token in tokens {
+                *counts.entry(token).or_insert(0.0) += 1.0;
+            }
+        }
+        let total_tokens: f64 = counts.values().sum();
+
+        counts
+            .into_iter()
+            .map(|(k, v)| (k, (v / total_tokens).ln()))
+            .collect()
+    }
     pub fn train(&mut self, text: &str, vocab_size: usize, _allowed_special: Option<Vec<String>>) {
         self.vocab = self.build_seed_vocab(
             text,
@@ -85,6 +135,18 @@ impl SentencePieceTokenizer {
         // self.save_vocab("./seed_vocab.txt").unwrap();
         // println!("Saved vocab to seed_vocab.txt");
         println!("Seed vocab size: {}", self.vocab.len());
+        let marker = Self::SPECIAL_TOKEN_SPACE_REPLACE;
+
+        let marked: Vec<String> = text
+            .split_whitespace()
+            .map(|w| format!("{marker}{w}"))
+            .collect();
+        let refs: Vec<&str> = marked.iter().map(|s| s.as_str()).collect();
+        while self.vocab.len() > vocab_size {
+            // E + M Step : recompute probs from viterbi counts
+            self.vocab = self.em_step(&refs);
+            println!("After EM: {} tokens", self.vocab.len());
+        }
     }
     // fn save_vocab(&self, path: &str) -> Result<(), String> {
     //     let mut tokens: Vec<(&String, &f64)> = self.vocab.iter().collect();
