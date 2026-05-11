@@ -73,9 +73,14 @@ impl SentencePieceTokenizer {
         }
         let log_total_tokens: f64 = seed.values().sum();
 
-        seed.into_iter()
+        let mut result: HashMap<String, f64> = seed
+            .into_iter()
             .map(|(k, v)| (k, (v / log_total_tokens).ln()))
-            .collect()
+            .collect();
+        // unknown token handling
+        result.insert("<unk>".to_string(), -1e10);
+
+        result
     }
 
     fn viterbi(&self, text: &str) -> Vec<String> {
@@ -98,10 +103,21 @@ impl SentencePieceTokenizer {
                 }
             }
         }
-        // after DP loop, before backtrack:
+        // after DP loop, before backtrack — replace unknown chars with <unk>
         if dp[n] == f64::NEG_INFINITY {
-            return chars.iter().map(|c| c.to_string()).collect();
+            return chars
+                .iter()
+                .map(|c| {
+                    let s = c.to_string();
+                    if self.vocab.contains_key(&s) {
+                        s
+                    } else {
+                        "<unk>".to_string()
+                    }
+                })
+                .collect();
         }
+
         let mut tokens = Vec::new();
         let mut i = n;
         //backtrack to recover the tokens and best segmentation
@@ -125,7 +141,7 @@ impl SentencePieceTokenizer {
         }
         // smoothing: keep all single chars even if viterbi never picked them
         for tok in self.vocab.keys() {
-            if tok.chars().count() == 1 {
+            if tok.chars().count() == 1 || tok == "<unk>" {
                 counts.entry(tok.clone()).or_insert(0.5);
             }
         }
@@ -151,46 +167,22 @@ impl SentencePieceTokenizer {
             .filter(|(k, _)| k.chars().count() > 1)
             .map(|(k, v)| (k.clone(), *v))
             .collect();
-
+        //
         multi_char.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
-        let remanining_size = target_size.saturating_sub(single_chars.len());
         let mut result: HashMap<String, f64> = single_chars.iter().cloned().collect();
-        for (token, log_pb) in multi_char.iter().take(remanining_size) {
+        let unk_lp = self.vocab.get("<unk>").copied();
+
+        if let Some(lp) = unk_lp {
+            result.insert("<unk>".to_string(), lp);
+        }
+        let remaining_size = target_size.saturating_sub(result.len());
+
+        for (token, log_pb) in multi_char.iter().take(remaining_size) {
             result.insert(token.clone(), *log_pb);
         }
 
         result
-    }
-
-    fn encode(&self, text: &str) -> Result<Vec<usize>, String> {
-        let marker = Self::SPECIAL_TOKEN_SPACE_REPLACE;
-        let mut ids = Vec::new();
-        for word in text.split_whitespace() {
-            let marked = format!("{marker}{word}");
-            let tokens = self.viterbi(&marked);
-            for t in tokens {
-                let id = self
-                    .token_to_id
-                    .get(&t)
-                    .ok_or_else(|| format!("Unknown token: {}", t))?;
-                ids.push(*id);
-            }
-        }
-        Ok(ids)
-    }
-
-    fn decode(&self, ids: &[usize]) -> Result<String, String> {
-        let marker = Self::SPECIAL_TOKEN_SPACE_REPLACE;
-        let mut s = String::new();
-        for &id in ids {
-            let tok = self
-                .id_to_token
-                .get(id)
-                .ok_or_else(|| format!("unknown id: {id}"))?;
-            s.push_str(tok);
-        }
-        Ok(s.replace(marker, " ").trim_start().to_string())
     }
 
     pub fn train(&mut self, text: &str, vocab_size: usize, _allowed_special: Option<Vec<String>>) {
@@ -230,26 +222,64 @@ impl SentencePieceTokenizer {
                 .collect();
         }
     }
-    // fn save_vocab(&self, path: &str) -> Result<(), String> {
-    //     let mut tokens: Vec<(&String, &f64)> = self.vocab.iter().collect();
-    //     tokens.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap()); // highest log-prob first
 
-    //     let lines: Vec<String> = tokens
-    //         .iter()
-    //         .map(|(tok, lp)| format!("{}\t{:.6}", tok, lp))
-    //         .collect();
+    fn save(&self, path: &str) -> Result<(), String> {
+        let data = serde_json::json!({
+            "vocab":self.vocab,
+            "id_to_token":self.id_to_token,
+        });
+        std::fs::write(path, data.to_string()).map_err(|e| e.to_string())
+    }
 
-    //     std::fs::write(path, lines.join("\n")).map_err(|e| e.to_string())
-    // }
+    fn load(&mut self, path: &str) -> Result<(), String> {
+        let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let data: serde_json::Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+
+        self.vocab = serde_json::from_value(data["vocab"].clone()).map_err(|e| e.to_string())?;
+
+        self.id_to_token =
+            serde_json::from_value(data["id_to_token"].clone()).map_err(|e| e.to_string())?;
+
+        self.token_to_id = self
+            .id_to_token
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.clone(), i))
+            .collect();
+
+        Ok(())
+    }
 }
 
 impl Tokenizer for SentencePieceTokenizer {
-    fn encode(&mut self, _text: &str) -> Result<Vec<usize>, String> {
-        unimplemented!("SentencePiece encode is intentionally left as boilerplate");
+    fn encode(&mut self, text: &str) -> Result<Vec<usize>, String> {
+        let marker = Self::SPECIAL_TOKEN_SPACE_REPLACE;
+        let mut ids = Vec::new();
+        for word in text.split_whitespace() {
+            let marked = format!("{marker}{word}");
+            let tokens = self.viterbi(&marked);
+            for t in tokens {
+                let id = self
+                    .token_to_id
+                    .get(&t)
+                    .ok_or_else(|| format!("Unknown token: {}", t))?;
+                ids.push(*id);
+            }
+        }
+        Ok(ids)
     }
 
-    fn decode(&self, _ids: &[usize]) -> Result<String, String> {
-        unimplemented!("SentencePiece decode is intentionally left as boilerplate");
+    fn decode(&self, ids: &[usize]) -> Result<String, String> {
+        let marker = Self::SPECIAL_TOKEN_SPACE_REPLACE;
+        let mut s = String::new();
+        for &id in ids {
+            let tok = self
+                .id_to_token
+                .get(id)
+                .ok_or_else(|| format!("unknown id: {id}"))?;
+            s.push_str(tok);
+        }
+        Ok(s.replace(marker, " ").trim_start().to_string())
     }
 }
 
@@ -263,5 +293,14 @@ fn main() {
     tokenizer.train(&text, 500, None);
     let ids = tokenizer.encode("the quick brown a fox").unwrap();
     println!("ids: {:?}", ids);
-    println!("decoded: {:?}", tokenizer.decode(&ids).unwrap())
+    println!("decoded: {:?}", tokenizer.decode(&ids).unwrap());
+    let ids = tokenizer.encode("the quick αβγ fox").unwrap();
+    println!("ids: {:?}", ids);
+    println!("decoded: {:?}", tokenizer.decode(&ids).unwrap());
+    tokenizer.save("./sp_model.json").unwrap();
+    let mut sp2 = SentencePieceTokenizer::new();
+    sp2.load("./sp_model.json").unwrap();
+    let ids = sp2.encode("the quick brown fox").unwrap();
+    println!("loaded encode: {:?}", ids);
+    println!("decoded: {:?}", sp2.decode(&ids).unwrap());
 }
