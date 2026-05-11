@@ -1,6 +1,6 @@
 mod tokenizer;
 use crate::tokenizer::Tokenizer;
-use std::{collections::HashMap, iter};
+use std::collections::HashMap;
 
 pub struct SentencePieceTokenizer {
     vocab: HashMap<String, f64>,         // token-> log_prob
@@ -126,6 +126,33 @@ impl SentencePieceTokenizer {
             .map(|(k, v)| (k, (v / total_tokens).ln()))
             .collect()
     }
+
+    fn prune(&self, target_size: usize) -> HashMap<String, f64> {
+        let single_chars: Vec<(String, f64)> = self
+            .vocab
+            .iter()
+            .filter(|(k, _)| k.chars().count() == 1)
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+
+        let mut multi_char: Vec<(String, f64)> = self
+            .vocab
+            .iter()
+            .filter(|(k, _)| k.chars().count() > 1)
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+
+        multi_char.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+        let remanining_size = target_size.saturating_sub(single_chars.len());
+        let mut result: HashMap<String, f64> = single_chars.iter().cloned().collect();
+        for (token, log_pb) in multi_char.iter().take(remanining_size) {
+            result.insert(token.clone(), *log_pb);
+        }
+
+        result
+    }
+
     pub fn train(&mut self, text: &str, vocab_size: usize, _allowed_special: Option<Vec<String>>) {
         self.vocab = self.build_seed_vocab(
             text,
@@ -145,6 +172,8 @@ impl SentencePieceTokenizer {
         while self.vocab.len() > vocab_size {
             // E + M Step : recompute probs from viterbi counts
             self.vocab = self.em_step(&refs);
+            let target_size = (vocab_size * 8 / 10).max(vocab_size);
+            self.vocab = self.prune(target_size);
             println!("After EM: {} tokens", self.vocab.len());
         }
     }
