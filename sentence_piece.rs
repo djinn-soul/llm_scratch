@@ -13,16 +13,27 @@
 //
 // Key difference from BPE: no merge rules — each token has independent prob.
 // Viterbi finds max-probability segmentation using DP.
+// https://everdark.github.io/k9/notebooks/ml/natural_language_understanding/subword_units/subword_units.nb.html
+// https://guillaume-be.github.io/2020-05-30/sentence_piece
+// https://huggingface.co/learn/llm-course/en/chapter6/7
+// https://mbrenndoerfer.com/writing/unigram-language-model-tokenization
+// https://mbrenndoerfer.com/writing/sentencepiece-subword-tokenization-bpe-unigram
+// https://en.wikipedia.org/wiki/Viterbi_algorithm
 // ════════════════════════════════════════════════════════════════════════════
 
 mod tokenizer;
 use crate::tokenizer::Tokenizer;
-use std::{collections::HashMap, fmt::format};
+use std::collections::HashMap;
 
 pub struct SentencePieceTokenizer {
-    vocab: HashMap<String, f64>,         // token -> log_prob (negative floats)
+    vocab: HashMap<String, f64>, // token -> log_prob (negative floats)
     token_to_id: HashMap<String, usize>, // token -> integer id (frozen after training)
-    id_to_token: Vec<String>,            // id -> token (index = id)
+    id_to_token: Vec<String>,    // id -> token (index = id)
+}
+
+pub enum SeedMethod {
+    Bpe,
+    Substring,
 }
 
 impl SentencePieceTokenizer {
@@ -111,6 +122,101 @@ impl SentencePieceTokenizer {
         result.insert("<unk>".to_string(), -1e10);
 
         result
+    }
+
+    // ── ALTERNATIVE SEED: BPE-BASED ─────────────────────────────────────────
+    // Use greedy pair-merging (BPE) instead of substring frequency for seeding.
+    // Produces cleaner linguistic subwords (ing, tion, ed) at cost of slower seed.
+    //
+    // Algorithm:
+    //   1. Each word starts as Vec<char-token> with ▁ prefix
+    //   2. Repeat up to seed_size times:
+    //      a. Count every adjacent pair (a, b) across all words
+    //      b. Pick most-frequent pair (must appear ≥ 2 times)
+    //      c. Create merged token "ab", record its count
+    //      d. Replace all (a, b) → "ab" in every word (in-place)
+    //   3. Return token_counts (raw counts — caller converts to log-probs)
+    //
+    // Returns counts not log-probs so caller can normalize once at end.
+    fn build_bpe_seed_vocab(text: &str, seed_size: usize) -> HashMap<String, usize> {
+        let marker = Self::SPECIAL_TOKEN_SPACE_REPLACE;
+
+        // Step 1: split corpus into words, each word = [▁, c1, c2, ...]
+        // Example: "low" → ["▁", "l", "o", "w"]
+        let mut words: Vec<Vec<String>> = text
+            .split_whitespace()
+            .map(|w| {
+                let mut toks: Vec<String> = w.chars().map(|c| c.to_string()).collect();
+                toks.insert(0, marker.to_string());
+                toks
+            })
+            .collect();
+
+        // Step 2: initial token counts from single-char alphabet
+        // These chars are guaranteed in vocab (never pruned later)
+        let mut token_counts: HashMap<String, usize> = HashMap::new();
+        for word in &words {
+            for token in word {
+                *token_counts.entry(token.clone()).or_insert(0) += 1;
+            }
+        }
+
+        // Step 3: do up to seed_size merges (stop early if no good pair left)
+        for _ in 0..seed_size {
+            // 3a: count every adjacent pair across all words
+            // For word ["▁", "l", "o", "w"]: pairs = (▁,l), (l,o), (o,w)
+            let mut pair_counts: HashMap<(String, String), usize> = HashMap::new();
+            for word in &words {
+                if word.len() < 2 {
+                    continue; // can't form a pair from 1 token
+                }
+                for i in 0..word.len() - 1 {
+                    let pair = (word[i].clone(), word[i + 1].clone());
+                    *pair_counts.entry(pair).or_insert(0) += 1;
+                }
+            }
+
+            // 3b: pick most-frequent pair (stop if none or only seen once)
+            let max_pair = pair_counts.iter().max_by_key(|&(_, c)| c);
+            let Some(((a, b), &cnt)) = max_pair else {
+                break; // no pairs left (all words length 1)
+            };
+            if cnt < 2 {
+                break; // no benefit merging a unique pair
+            }
+
+            // 3c: create merged token, record its count
+            let (a, b) = (a.clone(), b.clone());
+            let merge = format!("{a}{b}");
+            token_counts.insert(merge.clone(), cnt);
+
+            // 3d: rewrite every word — replace (a, b) → merge in-place
+            // Example: bigram ("l", "o"), word ["▁", "l", "o", "w"]
+            //   i=0: "▁" ≠ "l"     → keep "▁", i=1
+            //   i=1: "l"=="l" "o"=="o" → push "lo", i=3
+            //   i=3: last token → push "w"
+            //   → ["▁", "lo", "w"]
+            for word in words.iter_mut() {
+                let mut new_word: Vec<String> = Vec::new();
+                let mut i = 0;
+                while i < word.len() - 1 {
+                    if i + 1 < word.len() && word[i] == a && word[i + 1] == b {
+                        new_word.push(merge.clone());
+                        i += 2; // skip both consumed tokens
+                    } else {
+                        new_word.push(word[i].clone());
+                        i += 1;
+                    }
+                }
+                // Inner loop stops at len-1 → push last token if not consumed
+                if i < word.len() {
+                    new_word.push(word[i].clone());
+                }
+                *word = new_word;
+            }
+        }
+
+        token_counts
     }
 
     // ── VITERBI DECODE ──────────────────────────────────────────────────────
@@ -259,13 +365,29 @@ impl SentencePieceTokenizer {
     //   2. Pre-mark all words: ["hello", "world"] → ["▁hello", "▁world"]
     //   3. Loop EM + prune (shrink by 20% per iter) until vocab_size reached
     //   4. Freeze vocab → assign stable integer ids (sorted alphabetically)
-    pub fn train(&mut self, text: &str, vocab_size: usize, _allowed_special: Option<Vec<String>>) {
+    pub fn train(
+        &mut self,
+        text: &str,
+        vocab_size: usize,
+        seed_method: SeedMethod,
+        _allowed_special: Option<Vec<String>>,
+    ) {
         // Step 1: large seed vocab
-        self.vocab = self.build_seed_vocab(
-            text,
-            Self::MAX_SUBSTR_LEN,
-            vocab_size * Self::SEED_VOCAB_MULTIPLIER,
-        );
+        let seed_size = vocab_size * Self::SEED_VOCAB_MULTIPLIER;
+
+        self.vocab = match seed_method {
+            SeedMethod::Substring => self.build_seed_vocab(text, Self::MAX_SUBSTR_LEN, seed_size),
+            SeedMethod::Bpe => {
+                let counts = Self::build_bpe_seed_vocab(text, seed_size);
+                let total: usize = counts.values().sum();
+                let mut v: HashMap<String, f64> = counts
+                    .iter()
+                    .map(|(k, c)| (k.clone(), (*c as f64 / total as f64).ln()))
+                    .collect();
+                v.insert("<unk>".to_string(), -1e10);
+                v
+            }
+        };
         println!("Seed vocab size: {}", self.vocab.len());
 
         // Step 2: prepare corpus as list of ▁-prefixed words for per-word Viterbi
@@ -382,7 +504,7 @@ fn main() {
 
     // Train: seed → EM/prune loop → final vocab of 500 tokens
     let mut tokenizer = SentencePieceTokenizer::new();
-    tokenizer.train(&text, 500, None);
+    tokenizer.train(&text, 500, SeedMethod::Bpe, None);
 
     // Round-trip test 1: in-vocab text
     let ids = tokenizer.encode("the quick brown a fox").unwrap();
@@ -398,6 +520,8 @@ fn main() {
     tokenizer.save("./sp_model.json").unwrap();
     let mut sp2 = SentencePieceTokenizer::new();
     sp2.load("./sp_model.json").unwrap();
+    let mut tokenizer = SentencePieceTokenizer::new();
+    tokenizer.train(&text, 500, SeedMethod::Substring, None);
     let ids = sp2.encode("the quick brown fox").unwrap();
     println!("loaded encode: {:?}", ids);
     println!("decoded: {:?}", sp2.decode(&ids).unwrap());
