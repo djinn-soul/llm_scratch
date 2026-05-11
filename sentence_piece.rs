@@ -1,6 +1,6 @@
 mod tokenizer;
 use crate::tokenizer::Tokenizer;
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt::format};
 
 pub struct SentencePieceTokenizer {
     vocab: HashMap<String, f64>,         // token-> log_prob
@@ -98,6 +98,10 @@ impl SentencePieceTokenizer {
                 }
             }
         }
+        // after DP loop, before backtrack:
+        if dp[n] == f64::NEG_INFINITY {
+            return chars.iter().map(|c| c.to_string()).collect();
+        }
         let mut tokens = Vec::new();
         let mut i = n;
         //backtrack to recover the tokens and best segmentation
@@ -117,6 +121,12 @@ impl SentencePieceTokenizer {
             let tokens = self.viterbi(sent);
             for token in tokens {
                 *counts.entry(token).or_insert(0.0) += 1.0;
+            }
+        }
+        // smoothing: keep all single chars even if viterbi never picked them
+        for tok in self.vocab.keys() {
+            if tok.chars().count() == 1 {
+                counts.entry(tok.clone()).or_insert(0.5);
             }
         }
         let total_tokens: f64 = counts.values().sum();
@@ -153,6 +163,36 @@ impl SentencePieceTokenizer {
         result
     }
 
+    fn encode(&self, text: &str) -> Result<Vec<usize>, String> {
+        let marker = Self::SPECIAL_TOKEN_SPACE_REPLACE;
+        let mut ids = Vec::new();
+        for word in text.split_whitespace() {
+            let marked = format!("{marker}{word}");
+            let tokens = self.viterbi(&marked);
+            for t in tokens {
+                let id = self
+                    .token_to_id
+                    .get(&t)
+                    .ok_or_else(|| format!("Unknown token: {}", t))?;
+                ids.push(*id);
+            }
+        }
+        Ok(ids)
+    }
+
+    fn decode(&self, ids: &[usize]) -> Result<String, String> {
+        let marker = Self::SPECIAL_TOKEN_SPACE_REPLACE;
+        let mut s = String::new();
+        for &id in ids {
+            let tok = self
+                .id_to_token
+                .get(id)
+                .ok_or_else(|| format!("unknown id: {id}"))?;
+            s.push_str(tok);
+        }
+        Ok(s.replace(marker, " ").trim_start().to_string())
+    }
+
     pub fn train(&mut self, text: &str, vocab_size: usize, _allowed_special: Option<Vec<String>>) {
         self.vocab = self.build_seed_vocab(
             text,
@@ -172,9 +212,22 @@ impl SentencePieceTokenizer {
         while self.vocab.len() > vocab_size {
             // E + M Step : recompute probs from viterbi counts
             self.vocab = self.em_step(&refs);
-            let target_size = (vocab_size * 8 / 10).max(vocab_size);
-            self.vocab = self.prune(target_size);
             println!("After EM: {} tokens", self.vocab.len());
+
+            // keep top 80 % of vocab
+            let target_size = (self.vocab.len() * 8 / 10).max(vocab_size);
+
+            self.vocab = self.prune(target_size);
+            println!("After Prune: {} tokens", self.vocab.len());
+            // freeze vocab → assign stable ids
+            let mut tokens: Vec<String> = self.vocab.keys().cloned().collect();
+            tokens.sort(); // deterministic ids
+            self.id_to_token = tokens.clone();
+            self.token_to_id = tokens
+                .iter()
+                .enumerate()
+                .map(|(i, t)| (t.clone(), i))
+                .collect();
         }
     }
     // fn save_vocab(&self, path: &str) -> Result<(), String> {
@@ -208,4 +261,7 @@ fn main() {
 
     let mut tokenizer = SentencePieceTokenizer::new();
     tokenizer.train(&text, 500, None);
+    let ids = tokenizer.encode("the quick brown a fox").unwrap();
+    println!("ids: {:?}", ids);
+    println!("decoded: {:?}", tokenizer.decode(&ids).unwrap())
 }
