@@ -1,4 +1,5 @@
 // https://dubeyrahul.github.io/posts/llm-from-scratch/token-embeddings.html
+// https://www.yadavsaurabh.com/building-a-transformer-llm-with-code-evolution-of-positional-encoding/
 use rand::RngExt;
 pub struct TokenEmbedding {
     weight: Vec<Vec<f32>>, //[vocab_size][d_model]
