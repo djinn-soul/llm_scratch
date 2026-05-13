@@ -3,18 +3,11 @@ name = "llm_scratch_rs"
 version = "0.1.0"
 edition = "2021"
 
-[[bin]]
-name = "byte_pair"
-path = "bpe.rs"
-
-[[bin]]
-name = "sentence_piece"
-path = "sentence_piece.rs"
-
+[lib]
+path = "src/lib.rs"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 regex-lite = "0.1"
 reqwest = { version = "0.13.3", features = ["blocking"] }
-
