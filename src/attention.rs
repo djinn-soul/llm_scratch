@@ -65,17 +65,34 @@ impl SelfAttention {
         // Transpose K so columns become keys, then Q @ K^T gives a
         // [seq_len][seq_len] grid: scores[i][j] = how much query i matches key j.
         let k_t = transpose(&k);
-        let scores = matmul(&q, &k_t);
+        let scores: Vec<Vec<f32>> = matmul(&q, &k_t);
 
         // ── STEP 3: SCALE ───────────────────────────────────────────────────
         // Divide by sqrt(d_k). Without this, large d_k makes scores huge,
         // softmax collapses to near one-hot, and gradients vanish.
         let dk_sqrt = (self.d_k as f32).sqrt();
-        let scaled_scores: Vec<Vec<f32>> = scores
+        let mut scaled_scores: Vec<Vec<f32>> = scores
             .iter()
             .map(|row| row.iter().map(|scr| scr / dk_sqrt).collect())
             .collect();
-
+        // ── CAUSAL MASK ─────────────────────────────────────────────────────
+        // GPT predicts the next token — so a token must NOT see the future.
+        // For each query row i, every key column j > i is "the future":
+        // set it to -inf now, before softmax. Since exp(-inf) = 0, softmax
+        // turns those into 0 weight. End result: token i only attends to 0..=i.
+        //
+        //         key0 key1 key2 key3
+        //   query0  ok  -inf -inf -inf
+        //   query1  ok   ok  -inf -inf
+        //   query2  ok   ok   ok  -inf
+        //   query3  ok   ok   ok   ok
+        //
+        // i = query row, j = key column. Inner loop starts at i+1 = first future key.
+        for i in 0..scaled_scores.len(){
+            for j in (i+1)..scaled_scores[0].len(){
+                scaled_scores[i][j] = -f32::INFINITY;
+            }
+        }
         // ── STEP 4: WEIGHT ──────────────────────────────────────────────────
         // Softmax each row independently → attention weights. Every row now
         // sums to 1: it's a probability distribution over all tokens.
