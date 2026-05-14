@@ -15,7 +15,7 @@
 // token in the sequence, not just token i. That's how context flows.
 //
 // W_Q, W_K, W_V are learned during training. Here they're random — forward pass
-// is math-correct but produces meaningless output until backprop is added.
+// is math-correct but produces meaningless output until back-propagation is added.
 // https://sebastianraschka.com/blog/2023/self-attention-from-scratch.html
 // https://machinelearningmastery.com/the-attention-mechanism-from-scratch/
 // ════════════════════════════════════════════════════════════════════════════
@@ -35,7 +35,7 @@ pub struct SelfAttention {
 }
 
 impl SelfAttention {
-    // Build attention layer. Weight matrices random-initialised once here and
+    // Build attention layer. Weight matrices random-initialized once here and
     // reused for every forward pass (they only change during training).
     pub fn new(d_model: usize, d_k: usize, d_v: usize) -> SelfAttention {
         SelfAttention {
