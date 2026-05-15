@@ -5,3 +5,4 @@ pub mod embedding;
 pub mod attention;
 pub mod multi_head_attention;
 pub mod feed_forward;
+pub mod layer_norm;
