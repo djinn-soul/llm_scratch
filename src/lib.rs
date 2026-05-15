@@ -4,3 +4,4 @@ pub mod sentence_piece;
 pub mod embedding;
 pub mod attention;
 pub mod multi_head_attention;
+pub mod feed_forward;
