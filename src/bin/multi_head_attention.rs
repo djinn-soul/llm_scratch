@@ -11,5 +11,5 @@ fn main() {
     let out = mha.forward(&x);
 
     println!("In:  [{}][{}]", x.len(), x[0].len());
-    println!("Out: [{}][{}]", out.len(), out[0].len());   // [4][64]
+    println!("Out: [{}][{}]", out.len(), out[0].len()); // [4][64]
 }

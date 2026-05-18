@@ -1,4 +1,4 @@
-use llm_scratch_rs::bpe::{BytePair, download_file_if_not_present};
+use llm_scratch_rs::bpe::{download_file_if_not_present, BytePair};
 use std::fs;
 
 fn main() {

@@ -19,7 +19,8 @@
 // https://sebastianraschka.com/blog/2023/self-attention-from-scratch.html
 // https://machinelearningmastery.com/the-attention-mechanism-from-scratch/
 // ════════════════════════════════════════════════════════════════════════════
-use rand::RngExt;
+
+use crate::util::random_matrix;
 
 // w_q / w_k / w_v: learned projection matrices, shape [d_model][d_k or d_v]
 // d_model: width of each input token vector (e.g. 64)
@@ -88,8 +89,8 @@ impl SelfAttention {
         //   query3  ok   ok   ok   ok
         //
         // i = query row, j = key column. Inner loop starts at i+1 = first future key.
-        for i in 0..scaled_scores.len(){
-            for j in (i+1)..scaled_scores[0].len(){
+        for i in 0..scaled_scores.len() {
+            for j in (i + 1)..scaled_scores[0].len() {
                 scaled_scores[i][j] = -f32::INFINITY;
             }
         }
@@ -106,20 +107,6 @@ impl SelfAttention {
         // output[i] = Σ_j attention_weights[i][j] * v[j]
         matmul(&attention_weights, &v)
     }
-}
-
-// ── HELPER FUNCTIONS ────────────────────────────────────────────────────────
-
-// Random matrix [rows][cols], values in -1.0..1.0. Used for weight init.
-// Real models use smarter schemes (Xavier/Kaiming); uniform is fine for now.
-pub fn random_matrix(rows: usize, cols: usize) -> Vec<Vec<f32>> {
-    let mut rng = rand::rng();
-    let mut matrix = Vec::new();
-    for _ in 0..rows {
-        let row = (0..cols).map(|_| rng.random_range(-1.0..1.0)).collect();
-        matrix.push(row);
-    }
-    matrix
 }
 
 // Matrix multiply: a[m][n] @ b[n][p] = result[m][p]

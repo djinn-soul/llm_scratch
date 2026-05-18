@@ -10,5 +10,4 @@ fn main() {
     println!("In:  {:?}", x[0]);
     println!("Out: {:?}", out[0]);
     // Out values: near [-0.19, 1.41, -1.41, -0.19]
-    
 }

@@ -1,6 +1,8 @@
 // https://dubeyrahul.github.io/posts/llm-from-scratch/token-embeddings.html
 // https://www.yadavsaurabh.com/building-a-transformer-llm-with-code-evolution-of-positional-encoding/
+use crate::util::add;
 use rand::RngExt;
+
 pub struct TokenEmbedding {
     weight: Vec<Vec<f32>>, //[vocab_size][d_model]
     pub vocab_size: usize,
@@ -45,10 +47,6 @@ impl PositionalEmbedding {
     pub fn forward(&self, ids: usize) -> Vec<f32> {
         self.weight[ids].clone()
     }
-}
-
-pub fn add(a: &[f32], b: &[f32]) -> Vec<f32> {
-    a.iter().zip(b.iter()).map(|(x, y)| x + y).collect()
 }
 
 pub fn embed_sequence(
