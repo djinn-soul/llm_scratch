@@ -1,6 +1,6 @@
 // Smoke test: instantiate one TransformerBlock and run a forward pass.
 // Checks that shapes are preserved: [seq_len][d_model] → [seq_len][d_model].
-use llm_scratch_rs::transformer::Transformer;
+use llm_scratch_rs::models::transformer::Transformer;
 
 fn main() {
     let d_model = 64;
@@ -13,7 +13,7 @@ fn main() {
 
     // Fake input: seq_len tokens, each a d_model-wide zero vector
     // let x: Vec<Vec<f32>> = vec![vec![1_f32; d_model]; seq_len];
-    let x = llm_scratch_rs::util::random_matrix(seq_len, d_model);
+    let x = llm_scratch_rs::common::util::random_matrix(seq_len, d_model);
 
     let output = block.forward(&x);
 

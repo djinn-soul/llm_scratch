@@ -21,7 +21,7 @@
 // https://en.wikipedia.org/wiki/Viterbi_algorithm
 // ════════════════════════════════════════════════════════════════════════════
 
-use crate::tokenizer::Tokenizer;
+use crate::tokenizers::tokenizer::Tokenizer;
 use std::collections::HashMap;
 
 pub struct SentencePieceTokenizer {

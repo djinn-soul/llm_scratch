@@ -1,5 +1,5 @@
-use llm_scratch_rs::embedding::{embed_sequence, PositionalEmbedding, TokenEmbedding};
-use llm_scratch_rs::multi_head_attention::MultiHeadAttention;
+use llm_scratch_rs::attention::multi_head_attention::MultiHeadAttention;
+use llm_scratch_rs::layers::embedding::{embed_sequence, PositionalEmbedding, TokenEmbedding};
 
 fn main() {
     let d_model = 64;

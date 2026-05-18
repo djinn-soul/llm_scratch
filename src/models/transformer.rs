@@ -1,8 +1,7 @@
-use crate::feed_forward::FeedForward;
-use crate::layer_norm::LayerNorm;
-use crate::multi_head_attention::MultiHeadAttention;
-use crate::util::add_mat;
-use crate::util::random_matrix;
+use crate::attention::multi_head_attention::MultiHeadAttention;
+use crate::common::util::{add_mat, random_matrix};
+use crate::layers::feed_forward::FeedForward;
+use crate::layers::layer_norm::LayerNorm;
 
 pub struct Transformer {
     pub layer_norm: LayerNorm,

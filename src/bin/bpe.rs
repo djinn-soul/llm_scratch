@@ -1,4 +1,4 @@
-use llm_scratch_rs::bpe::{download_file_if_not_present, BytePair};
+use llm_scratch_rs::tokenizers::bpe::{download_file_if_not_present, BytePair};
 use std::fs;
 
 fn main() {

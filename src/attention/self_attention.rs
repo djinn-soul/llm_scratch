@@ -20,7 +20,7 @@
 // https://machinelearningmastery.com/the-attention-mechanism-from-scratch/
 // ════════════════════════════════════════════════════════════════════════════
 
-use crate::util::random_matrix;
+use crate::common::util::random_matrix;
 
 // w_q / w_k / w_v: learned projection matrices, shape [d_model][d_k or d_v]
 // d_model: width of each input token vector (e.g. 64)

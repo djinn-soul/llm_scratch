@@ -1,5 +1,5 @@
-use llm_scratch_rs::sentence_piece::{SeedMethod, SentencePieceTokenizer};
-use llm_scratch_rs::tokenizer::Tokenizer;
+use llm_scratch_rs::tokenizers::sentence_piece::{SeedMethod, SentencePieceTokenizer};
+use llm_scratch_rs::tokenizers::tokenizer::Tokenizer;
 
 fn main() {
     let text =

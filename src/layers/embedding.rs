@@ -1,6 +1,6 @@
 // https://dubeyrahul.github.io/posts/llm-from-scratch/token-embeddings.html
 // https://www.yadavsaurabh.com/building-a-transformer-llm-with-code-evolution-of-positional-encoding/
-use crate::util::add;
+use crate::common::util::add;
 use rand::RngExt;
 
 pub struct TokenEmbedding {

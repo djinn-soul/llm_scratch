@@ -1,4 +1,4 @@
-use llm_scratch_rs::layer_norm::LayerNorm;
+use llm_scratch_rs::layers::layer_norm::LayerNorm;
 fn main() {
     let d_model = 4;
     let ln = LayerNorm::new(d_model);

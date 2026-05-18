@@ -1,6 +1,6 @@
-use llm_scratch_rs::embedding::{embed_sequence, PositionalEmbedding, TokenEmbedding};
-use llm_scratch_rs::feed_forward::FeedForward;
-use llm_scratch_rs::util::random_matrix;
+use llm_scratch_rs::common::util::random_matrix;
+use llm_scratch_rs::layers::embedding::{embed_sequence, PositionalEmbedding, TokenEmbedding};
+use llm_scratch_rs::layers::feed_forward::FeedForward;
 
 fn main() {
     let d_model = 64;

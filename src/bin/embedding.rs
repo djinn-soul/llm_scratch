@@ -1,4 +1,4 @@
-use llm_scratch_rs::embedding::{embed_sequence, PositionalEmbedding, TokenEmbedding};
+use llm_scratch_rs::layers::embedding::{embed_sequence, PositionalEmbedding, TokenEmbedding};
 
 fn main() {
     let vocab_size = 1000;

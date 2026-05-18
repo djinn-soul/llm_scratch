@@ -18,7 +18,7 @@
 // until back-propagation is added.
 // https://sebastianraschka.com/blog/2023/self-attention-from-scratch.html
 // ════════════════════════════════════════════════════════════════════════════
-use crate::attention::matmul;
+use crate::attention::self_attention::matmul;
 
 // w_1: expansion weights  [d_model][d_ff]  — widens each token vector
 // w_2: shrink weights     [d_ff][d_model]  — restores original width
