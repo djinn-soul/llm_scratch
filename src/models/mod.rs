@@ -1,2 +1,2 @@
-pub mod transformer;
 pub mod gpt;
+pub mod transformer;

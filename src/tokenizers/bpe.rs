@@ -79,7 +79,7 @@ impl BytePair {
     }
 
     pub fn train(&mut self, text: &str, vocab_size: usize, allowed_special: Option<Vec<String>>) {
-        println!("Training BPE on text: {}", text);
+        // println!("Training BPE on text: {}", text);
         println!("Vocabulary size: {}", vocab_size);
 
         if let Some(ref special_tokens) = allowed_special {

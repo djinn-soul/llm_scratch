@@ -30,6 +30,16 @@ impl TokenEmbedding {
     pub fn forward(&self, ids: usize) -> Vec<f32> {
         self.weight[ids].clone()
     }
+    pub fn transposed_weight(&self) -> Vec<Vec<f32>> {
+        let mut transposed = vec![vec![0.0; self.vocab_size]; self.d_model];
+
+        for token_id in 0..self.vocab_size {
+            for dim in 0..self.d_model {
+                transposed[dim][token_id] = self.weight[token_id][dim];
+            }
+        }
+        transposed
+    }
 }
 
 impl PositionalEmbedding {

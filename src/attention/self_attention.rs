@@ -20,8 +20,8 @@
 // https://machinelearningmastery.com/the-attention-mechanism-from-scratch/
 // ════════════════════════════════════════════════════════════════════════════
 
+use crate::common::activation::softmax;
 use crate::common::util::random_matrix;
-
 // w_q / w_k / w_v: learned projection matrices, shape [d_model][d_k or d_v]
 // d_model: width of each input token vector (e.g. 64)
 // d_k:     width of query/key vectors — controls score-space dimension
@@ -144,19 +144,6 @@ pub fn transpose(matrix: &Vec<Vec<f32>>) -> Vec<Vec<f32>> {
         transposed.push(row);
     }
     transposed
-}
-
-// Softmax: turn a vector of raw scores into probabilities that sum to 1.
-//   softmax(x_i) = e^(x_i) / Σ_j e^(x_j)
-// Denominator (sum) is the same for every element, so compute it once.
-// Note: no max-subtraction here — fine for small values, can overflow on big.
-pub fn softmax(x: &Vec<f32>) -> Vec<f32> {
-    let mut result: Vec<f32> = Vec::new();
-    let sum: f32 = x.iter().map(|v| v.exp()).sum();
-    for i in 0..x.len() {
-        result.push(x[i].exp() / sum);
-    }
-    result
 }
 
 // ════════════════════════════════════════════════════════════════════════════
