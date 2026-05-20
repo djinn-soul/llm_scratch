@@ -98,6 +98,10 @@ impl GPT {
         matmul(&x, &self.lm_head)
     }
 
+    pub fn backward(&mut self, d_logits: &Vec<Vec<f32>>) {
+        // 1. Calculate gradient for lm_head and project back into last residual stream
+    }
+
     pub fn generate(&self, context: &[usize], max_new_tokens: usize) -> Vec<usize> {
         let mut tokens = context.to_vec();
         let max_seq_len = self.position_emb.max_seq_len;
