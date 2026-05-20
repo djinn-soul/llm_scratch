@@ -1,19 +1,23 @@
 // ════════════════════════════════════════════════════════════════════════════
 // TRANSFORMER DECODER BLOCK — PRE-NORM GPT-STYLE BLOCK
 // ════════════════════════════════════════════════════════════════════════════
-// A transformer block turns token embeddings into context-aware representations.
-// Each block has two main sublayers:
+// Reusable decoder block used inside GPT.
 //
-//   1. MULTI-HEAD SELF-ATTENTION — lets each token read earlier tokens
-//   2. FEED-FORWARD NETWORK     — applies per-token nonlinear mixing
-//
-// This file uses a pre-norm layout:
-//   x -> LayerNorm -> Attention -> Residual Add
-//     -> LayerNorm -> FeedForward -> Residual Add
+// Algorithm:
+//   1. NORM       — normalize the residual stream before attention
+//   2. ATTEND     — causal multi-head attention mixes earlier token context
+//   3. RESIDUAL   — add the attention update back to the original stream
+//   4. NORM       — normalize again before the feed-forward network
+//   5. MLP        — transform each token vector independently
+//   6. RESIDUAL   — add the feed-forward update back to the stream
 //
 // Key idea: attention mixes information ACROSS tokens, while feed-forward mixes
 // information WITHIN each token vector. Residual connections keep the original
 // signal flowing so deeper stacks remain trainable.
+//
+// Layout:
+//   x -> LayerNorm -> CausalAttention -> ResidualAdd
+//     -> LayerNorm -> FeedForward     -> ResidualAdd
 // ════════════════════════════════════════════════════════════════════════════
 
 use crate::attention::multi_head_attention::MultiHeadAttention;
@@ -21,20 +25,17 @@ use crate::common::util::{add_mat, random_matrix};
 use crate::layers::feed_forward::FeedForward;
 use crate::layers::layer_norm::LayerNorm;
 
-// One GPT-style decoder block.
+// layer_norm:  first pre-norm before self-attention
+// mha:         multi-head causal self-attention
+// layer_norm2: second pre-norm before feed-forward
+// ff:          position-wise MLP applied to each token vector
 //
-// Shapes:
-//   input/output x: [seq_len][d_model]
-//   attention:      [seq_len][d_model]
-//   feed-forward:   [seq_len][d_model]
+// Shape stays stable so blocks can be stacked:
+//   [seq_len][d_model] -> [seq_len][d_model]
 pub struct Transformer {
-    // First normalization happens before self-attention.
     pub layer_norm: LayerNorm,
-    // Multi-head causal self-attention: tokens read previous/current tokens.
     pub mha: MultiHeadAttention,
-    // Second normalization happens before the feed-forward network.
     pub layer_norm2: LayerNorm,
-    // Position-wise MLP applied independently to each token vector.
     pub ff: FeedForward,
 }
 

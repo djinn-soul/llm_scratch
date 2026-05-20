@@ -1,3 +1,4 @@
+//https://jaykmody.com/blog/gpt-from-scratch/
 use llm_scratch_rs::{common::loss::cross_entropy_loss, models::gpt::GPT};
 
 fn main() {
