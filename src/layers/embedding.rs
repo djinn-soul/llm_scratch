@@ -34,6 +34,11 @@ impl TokenEmbedding {
     pub fn forward(&self, ids: usize) -> Vec<f32> {
         self.weight[ids].clone()
     }
+
+    pub fn backward(&mut self, _ids: &[usize], _d_out: &[Vec<f32>]) {
+        todo!("TokenEmbedding::backward must scatter gradients into token rows")
+    }
+
     pub fn transposed_weight(&self) -> Vec<Vec<f32>> {
         let mut transposed = vec![vec![0.0; self.vocab_size]; self.d_model];
 
@@ -60,6 +65,10 @@ impl PositionalEmbedding {
     }
     pub fn forward(&self, ids: usize) -> Vec<f32> {
         self.weight[ids].clone()
+    }
+
+    pub fn backward(&mut self, _seq_len: usize, _d_out: &[Vec<f32>]) {
+        todo!("PositionalEmbedding::backward must scatter gradients into position rows")
     }
 }
 

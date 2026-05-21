@@ -71,8 +71,9 @@ impl FeedForward {
         matmul(&activated, &self.w_2)
     }
 
-    // TODO(backward): implement reverse pass:
-    // d_out -> d_w2 + d_relu -> d_hidden -> d_w1 + d_x.
+    pub fn backward(&mut self, _d_out: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        todo!("FeedForward::backward must compute d_w2, d_w1, and d_x")
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════════

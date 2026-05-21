@@ -110,9 +110,11 @@ impl SelfAttention {
         matmul(&attention_weights, &v)
     }
 
-    // TODO(backward): implement reverse pass through:
-    // output -> attention_weights @ V -> softmax -> scale -> Q @ K^T
-    // -> projection gradients for W_Q, W_K, W_V and d_x.
+    pub fn backward(&mut self, _d_out: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        todo!(
+            "SelfAttention::backward must reverse V blend, softmax, scores, and Q/K/V projections"
+        )
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════════

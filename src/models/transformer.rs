@@ -81,9 +81,9 @@ impl Transformer {
         add_mat(&h, &ff)
     }
 
-    // TODO(backward): reverse the pre-norm block:
-    // d_output -> residual split -> FFN -> LayerNorm2 -> MHA residual
-    // -> MultiHeadAttention -> LayerNorm1 -> d_x.
+    pub fn backward(&mut self, _d_output: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        todo!("Transformer::backward must reverse FFN, LayerNorm2, MHA, LayerNorm1, and residuals")
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════════

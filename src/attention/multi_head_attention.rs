@@ -91,8 +91,9 @@ impl MultiHeadAttention {
         matmul(&concatenated, &self.w_o)
     }
 
-    // TODO(backward): split d_concatenated back into per-head gradients, call
-    // each head.backward(), sum their d_x values, and compute d_w_o.
+    pub fn backward(&mut self, _d_out: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        todo!("MultiHeadAttention::backward must split head grads, sum d_x, and compute d_w_o")
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════════

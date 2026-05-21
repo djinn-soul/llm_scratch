@@ -146,6 +146,7 @@ impl GPT {
         // ── STEP 3: Transformer blocks backward (reversed) ──────────────────
         // TODO(backward): pass d_x through decoder blocks in reverse order, then
         // scatter the final embedding gradient into token_emb and position_emb.
+        todo!("GPT::backward must reverse decoder blocks and scatter embedding gradients")
     }
 
     pub fn generate(&mut self, context: &[usize], max_new_tokens: usize) -> Vec<usize> {
