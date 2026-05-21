@@ -9,7 +9,7 @@ fn main() {
     let seq_len = 5;
 
     // Build one transformer block with random weights
-    let block = Transformer::new(d_model, num_heads, d_ff);
+    let mut block = Transformer::new(d_model, num_heads, d_ff);
 
     // Fake input: seq_len tokens, each a d_model-wide zero vector
     // let x: Vec<Vec<f32>> = vec![vec![1_f32; d_model]; seq_len];

@@ -15,7 +15,7 @@ pub fn main() {
     let mut tokenizer = BytePair::new();
     println!("Training tokenizer...");
     tokenizer.train(&text, vocab_size, None);
-    let gpt = GPT::new(
+    let mut gpt = GPT::new(
         vocab_size, // 100
         16,         // d_model
         32,         // max_seq_len

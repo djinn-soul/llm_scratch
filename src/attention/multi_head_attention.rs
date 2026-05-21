@@ -19,8 +19,8 @@
 // https://sebastianraschka.com/blog/2023/self-attention-from-scratch.html
 // https://machinelearningmastery.com/the-attention-mechanism-from-scratch/
 // ════════════════════════════════════════════════════════════════════════════
-use crate::attention::self_attention::{matmul, SelfAttention};
-use crate::common::util::random_matrix;
+use crate::attention::self_attention::SelfAttention;
+use crate::common::util::{matmul, random_matrix};
 // heads:     num_heads independent SelfAttention layers, each width d_model/num_heads
 // w_o:       output projection, shape [num_heads * d_v][d_model] — mixes heads
 // num_heads: how many parallel heads (d_model must divide evenly by this)

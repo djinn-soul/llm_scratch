@@ -52,7 +52,7 @@ impl Transformer {
         }
     }
 
-    pub fn forward(&self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    pub fn forward(&mut self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
         // ── STEP 1: NORMALIZE BEFORE ATTENTION ──────────────────────────────
         // Pre-norm stabilizes deep transformer stacks because each sublayer
         // receives normalized activations.

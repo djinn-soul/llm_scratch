@@ -1,7 +1,7 @@
 use llm_scratch_rs::layers::layer_norm::LayerNorm;
 fn main() {
     let d_model = 4;
-    let ln = LayerNorm::new(d_model);
+    let mut ln = LayerNorm::new(d_model);
 
     // wildly different values — after norm they should be near mean=0, std=1
     let x = vec![vec![2.0_f32, 100.0, -50.0, 3.0]];

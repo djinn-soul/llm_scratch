@@ -21,7 +21,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 
 use crate::common::activation::softmax;
-use crate::common::util::random_matrix;
+use crate::common::util::{mat_transpose, matmul, random_matrix};
 // w_q / w_k / w_v: learned projection matrices, shape [d_model][d_k or d_v]
 // d_model: width of each input token vector (e.g. 64)
 // d_k:     width of query/key vectors — controls score-space dimension
@@ -65,7 +65,7 @@ impl SelfAttention {
         // Attention = softmax(Q @ K^T / sqrt(d_k)) @ V
         // Transpose K so columns become keys, then Q @ K^T gives a
         // [seq_len][seq_len] grid: scores[i][j] = how much query i matches key j.
-        let k_t = transpose(&k);
+        let k_t = mat_transpose(&k);
         let scores: Vec<Vec<f32>> = matmul(&q, &k_t);
 
         // ── STEP 3: SCALE ───────────────────────────────────────────────────
@@ -107,43 +107,6 @@ impl SelfAttention {
         // output[i] = Σ_j attention_weights[i][j] * v[j]
         matmul(&attention_weights, &v)
     }
-}
-
-// Matrix multiply: a[m][n] @ b[n][p] = result[m][p]
-// Triple nested loop — O(m*n*p). Slow but clear.
-//   result[i][j] = Σ_k a[i][k] * b[k][j]
-pub fn matmul(a: &Vec<Vec<f32>>, b: &Vec<Vec<f32>>) -> Vec<Vec<f32>> {
-    let mut result: Vec<Vec<f32>> = Vec::new();
-    for i in 0..a.len() {
-        let mut row: Vec<f32> = Vec::new();
-        for j in 0..b[0].len() {
-            let mut sum = 0.0;
-            // walk shared inner dimension, multiply-accumulate
-            for k in 0..a[0].len() {
-                sum += a[i][k] * b[k][j];
-            }
-            row.push(sum);
-        }
-        result.push(row);
-    }
-
-    result
-}
-
-// Transpose: flip rows and columns. [rows][cols] → [cols][rows]
-// transposed[i][j] = matrix[j][i]. Needed to compute Q @ K^T.
-pub fn transpose(matrix: &Vec<Vec<f32>>) -> Vec<Vec<f32>> {
-    let rows = matrix.len();
-    let cols = matrix[0].len();
-    let mut transposed: Vec<Vec<f32>> = Vec::new();
-    for i in 0..cols {
-        let mut row: Vec<f32> = Vec::new();
-        for j in 0..rows {
-            row.push(matrix[j][i])
-        }
-        transposed.push(row);
-    }
-    transposed
 }
 
 // ════════════════════════════════════════════════════════════════════════════

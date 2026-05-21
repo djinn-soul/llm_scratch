@@ -23,7 +23,8 @@
 // https://sebastianraschka.com/llms-from-scratch/
 // ════════════════════════════════════════════════════════════════════════════
 
-use crate::attention::self_attention::matmul;
+use crate::common::util::mat_transpose;
+use crate::common::util::matmul;
 use crate::layers::embedding::{embed_sequence, PositionalEmbedding, TokenEmbedding};
 use crate::layers::layer_norm::LayerNorm;
 use crate::models::transformer::Transformer;
@@ -41,6 +42,12 @@ pub struct GPT {
     pub blocks: Vec<Transformer>,
     pub norm: LayerNorm,
     pub lm_head: Vec<Vec<f32>>,
+    pub lm_head_grad: Vec<Vec<f32>>,
+
+    // ── Activations saved during forward(), used by backward() ──
+    cache_embed: Vec<Vec<f32>>,
+    cache_blocks: Vec<Vec<Vec<f32>>>,
+    cache_norm: Vec<Vec<f32>>,
 }
 
 impl GPT {
@@ -67,7 +74,7 @@ impl GPT {
         // 4. Final layer normalization: stabilizes the last residual stream.
         let norm = LayerNorm::new(d_model);
 
-        // 5. Language-model head: ties output projection to token embeddings.
+        // 5. Language-model head: ties output projection to token embeddings. (weight tying)
         let lm_head = token_emb.transposed_weight();
 
         Self {
@@ -76,22 +83,34 @@ impl GPT {
             blocks,
             norm,
             lm_head,
+            lm_head_grad: vec![vec![0.0; vocab_size]; d_model],
+            cache_blocks: Vec::new(),
+            cache_embed: Vec::new(),
+            cache_norm: Vec::new(),
         }
     }
-    pub fn forward(&self, tokens: &[usize]) -> Vec<Vec<f32>> {
+    pub fn forward(&mut self, tokens: &[usize]) -> Vec<Vec<f32>> {
+        // Clear caches from previous forward pass
+        self.cache_embed.clear();
+        self.cache_blocks.clear();
+        self.cache_norm.clear();
+
         // ── STEP 1: EMBED TOKEN IDS ─────────────────────────────────────────
         // Combine token identity with absolute position information.
         let mut x = embed_sequence(tokens, &self.token_emb, &self.position_emb);
+        self.cache_embed = x.clone();
 
         // ── STEP 2: RUN THE DECODER STACK ───────────────────────────────────
         // Each block adds causal context and per-token nonlinear processing.
-        for block in &self.blocks {
+        for block in &mut self.blocks {
+            self.cache_blocks.push(x.clone());
             x = block.forward(&x);
         }
 
         // ── STEP 3: FINAL NORMALIZATION ─────────────────────────────────────
         // GPT-style models normalize before the final vocabulary projection.
         let x = self.norm.forward(&x);
+        self.cache_norm = x.clone(); // ← AFTER norm ✅
 
         // ── STEP 4: PROJECT TO VOCABULARY LOGITS ────────────────────────────
         // One row of logits per input token position.
@@ -100,9 +119,30 @@ impl GPT {
 
     pub fn backward(&mut self, d_logits: &Vec<Vec<f32>>) {
         // 1. Calculate gradient for lm_head and project back into last residual stream
+
+        // ── STEP 1: CALCULATE dL/dLm ─────────────────────────────────────
+        // We have dL/d_logits. We need to compute dL/d_lm_head using:
+        // dL/d_lm_head = dL/d_logits * d_logits/d_lm_head
+        // This is equivalent to matmul(d_logits^T, hidden_final) using the chain rule.
+
+        // ── STEP 1: CALCULATE dL/dLm ─────────────────────────────────────
+        // Forward:   logits    = cache_norm @ lm_head
+        // Backward:  d_norm    = d_logits  @ lm_head^T   (flows left)
+        //            d_lm_head = cache_norm^T @ d_logits  (weight gradient)
+        let norm_t = mat_transpose(&self.cache_norm);
+        self.lm_head_grad = matmul(&norm_t, d_logits);
+
+        // d_hidden_final_from_logits has shape [seq_len][d_model]
+        let lm_head_t = mat_transpose(&self.lm_head);
+        let mut d_norm = matmul(d_logits, &lm_head_t);
+        // ── STEP 2: LayerNorm backward ──────────────────────────────────────
+        // d_norm flows into LayerNorm, gives d_x (gradient before the norm)
+        let mut d_x = self.norm.backward(&d_norm); // [seq][d_model]
+
+        // ── STEP 3: Transformer blocks backward (reversed) ──────────────────
     }
 
-    pub fn generate(&self, context: &[usize], max_new_tokens: usize) -> Vec<usize> {
+    pub fn generate(&mut self, context: &[usize], max_new_tokens: usize) -> Vec<usize> {
         let mut tokens = context.to_vec();
         let max_seq_len = self.position_emb.max_seq_len;
 

@@ -11,7 +11,7 @@ fn main() {
     let num_blocks = 2;
 
     // 2. Build the model
-    let gpt = GPT::new(
+    let mut gpt = GPT::new(
         vocab_size,
         d_model,
         max_seq_len,

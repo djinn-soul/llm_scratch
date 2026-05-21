@@ -33,6 +33,11 @@ pub struct LayerNorm {
     pub gamma: Vec<f32>, // [d_model] — scale, init 1.0
     pub beta: Vec<f32>,  // [d_model] — shift, init 0.0
     pub eps: f32,        // ~1e-5, prevents div-by-zero
+
+    cache_x_hat: Vec<Vec<f32>>, // normalized values per row, before gamma/beta
+    cache_std: Vec<f32>,        // std_dev per row
+    d_gamma: Vec<f32>,
+    d_beta: Vec<f32>,
 }
 
 impl LayerNorm {
@@ -42,12 +47,16 @@ impl LayerNorm {
             gamma: vec![1.0; d_model],
             beta: vec![0.0; d_model],
             eps: 1e-5,
+            cache_x_hat: Vec::new(),
+            cache_std: Vec::new(),
+            d_gamma: vec![0.0; d_model],
+            d_beta: vec![0.0; d_model],
         }
     }
 
     // Normalize a single token row. Private — callers always use forward().
     // formula: y[i] = gamma[i] * (x[i] - mean) / sqrt(variance + eps) + beta[i]
-    fn norm_row(&self, row: &[f32]) -> Vec<f32> {
+    fn norm_row(&mut self, row: &[f32]) -> Vec<f32> {
         let n = row.len() as f32;
 
         // ── STEP 1: MEAN ────────────────────────────────────────────────────
@@ -66,19 +75,131 @@ impl LayerNorm {
 
         // ── STEP 4: NORMALIZE + RESCALE ─────────────────────────────────────
         // (x - mean) / std_dev  →  zero-mean, unit-variance
-        // × gamma + beta        →  learned scale and shift per feature
+        let x_hat: Vec<f32> = row.iter().map(|v| (v - mean) / std_dev).collect();
+        // x_hat * gamma + beta    →  learned scale and shift per feature
         // All three iterators walk in lock-step: x[i], gamma[i], beta[i].
-        row.iter()
+        let y: Vec<f32> = x_hat
+            .iter()
             .zip(self.gamma.iter())
             .zip(self.beta.iter())
-            .map(|((v, g), b)| g * (v - mean) / std_dev + b)
-            .collect()
+            .map(|((xh, g), b)| g * xh + b)
+            .collect();
+
+        self.cache_x_hat.push(x_hat);
+        self.cache_std.push(std_dev);
+
+        y
     }
 
     // Forward pass: x = [seq_len][d_model] → output [seq_len][d_model]
     // Each token row normalized independently. Shape is always preserved.
-    pub fn forward(&self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    pub fn forward(&mut self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        self.cache_x_hat.clear();
+        self.cache_std.clear();
         x.iter().map(|row| self.norm_row(row)).collect()
+    }
+
+    //
+    // Forward:
+    // mean     = sum(x) / n
+    // variance = sum((x - mean)^2) / n
+    // x_hat    = (x - mean) / std
+    // output   = gamma * x_hat + beta
+    //
+    // Backward goal:
+    // Given d_out = dL/d_output
+    // compute:
+    // 1. d_gamma
+    // 2. d_beta
+    // 3. d_x (gradient flowing to previous layer)
+    // Final dL/dx formula, per token row:
+    // dL/dx = (d_xhat - mean(d_xhat) - x_hat * mean(d_xhat * x_hat)) / std
+    pub fn backward(&mut self, d_out: &Vec<Vec<f32>>) -> Vec<Vec<f32>> {
+        let n = self.gamma.len() as f32;
+        let mut d_x: Vec<Vec<f32>> = Vec::with_capacity(d_out.len());
+
+        // These gradients belong to this backward call. Reset before summing
+        // contributions from every token row in the sequence.
+        self.d_gamma.fill(0.0);
+        self.d_beta.fill(0.0);
+
+        for i in 0..d_out.len() {
+            let x_hat = &self.cache_x_hat[i];
+            let std_dev = self.cache_std[i];
+
+            // ------------------------------------------------------------
+            // STEP 1:
+            // Compute gradient wrt gamma and beta
+            //
+            // Forward:
+            // y = gamma * x_hat + beta
+            //
+            // d_gamma += d_out * x_hat
+            // d_beta  += d_out
+            // ------------------------------------------------------------
+            for j in 0..self.gamma.len() {
+                // dL/d_gamma
+                self.d_gamma[j] += d_out[i][j] * x_hat[j];
+                // dL/d_beta
+                self.d_beta[j] += d_out[i][j];
+            }
+            // ------------------------------------------------------------
+            // STEP 2:
+            // Gradient wrt normalized values
+            //
+            // Since:
+            // y = gamma * x_hat
+            //
+            // d_xhat = d_out * gamma
+            // ------------------------------------------------------------
+            let mut d_xhat = vec![0.0; self.gamma.len()];
+            for j in 0..self.gamma.len() {
+                d_xhat[j] = d_out[i][j] * self.gamma[j];
+            }
+
+            // ------------------------------------------------------------
+            // STEP 3:
+            // Compute helper sums
+            //
+            // These are needed because LayerNorm connects
+            // all features through mean and variance.
+            // ------------------------------------------------------------
+
+            let sum_dxhat: f32 = d_xhat.iter().sum();
+            let sum_dxhat_xhat: f32 = d_xhat
+                .iter()
+                .zip(x_hat.iter())
+                .map(|(dxh, xh)| dxh * xh)
+                .sum();
+            // inverse std deviation
+            // 1 / sqrt(var + eps)
+            let inv_std = 1.0 / (std_dev);
+
+            // ------------------------------------------------------------
+            // STEP 4:
+            // Final LayerNorm backward formula
+            //
+            // dx =
+            // inv_std *
+            // (
+            //   d_xhat
+            //   - mean(d_xhat)
+            //   - x_hat * mean(d_xhat * x_hat)
+            // )
+            //
+            // This:
+            // 1. passes gradient through
+            // 2. removes mean effect
+            // 3. removes variance effect
+            // ------------------------------------------------------------
+            let mut dx_inside = vec![0.0; self.gamma.len()];
+            for j in 0..self.gamma.len() {
+                dx_inside[j] =
+                    inv_std * (d_xhat[j] - (sum_dxhat / n) - (x_hat[j] * sum_dxhat_xhat / n));
+            }
+            d_x.push(dx_inside);
+        }
+        d_x
     }
 }
 
