@@ -30,6 +30,8 @@ pub struct SelfAttention {
     pub w_q: Vec<Vec<f32>>,
     pub w_k: Vec<Vec<f32>>,
     pub w_v: Vec<Vec<f32>>,
+    // TODO(backward): store q/k/v, masked softmax weights, and gradients for
+    // w_q/w_k/w_v so attention can train.
     pub d_model: usize, // dimension of the model
     pub d_k: usize,     // dimension of the key
     pub d_v: usize,     // dimension of the value
@@ -107,6 +109,10 @@ impl SelfAttention {
         // output[i] = Σ_j attention_weights[i][j] * v[j]
         matmul(&attention_weights, &v)
     }
+
+    // TODO(backward): implement reverse pass through:
+    // output -> attention_weights @ V -> softmax -> scale -> Q @ K^T
+    // -> projection gradients for W_Q, W_K, W_V and d_x.
 }
 
 // ════════════════════════════════════════════════════════════════════════════

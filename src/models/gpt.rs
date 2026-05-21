@@ -43,11 +43,15 @@ pub struct GPT {
     pub norm: LayerNorm,
     pub lm_head: Vec<Vec<f32>>,
     pub lm_head_grad: Vec<Vec<f32>>,
+    // TODO(backward): decide whether lm_head stays tied to token_emb weights
+    // during updates, then route lm_head gradients into token embedding grads.
 
     // ── Activations saved during forward(), used by backward() ──
     cache_embed: Vec<Vec<f32>>,
     cache_blocks: Vec<Vec<Vec<f32>>>,
     cache_norm: Vec<Vec<f32>>,
+    // TODO(backward): cache token IDs/positions so embedding gradients can be
+    // scattered back to token and positional embedding tables.
 }
 
 impl GPT {
@@ -134,12 +138,14 @@ impl GPT {
 
         // d_hidden_final_from_logits has shape [seq_len][d_model]
         let lm_head_t = mat_transpose(&self.lm_head);
-        let mut d_norm = matmul(d_logits, &lm_head_t);
+        let d_norm = matmul(d_logits, &lm_head_t);
         // ── STEP 2: LayerNorm backward ──────────────────────────────────────
         // d_norm flows into LayerNorm, gives d_x (gradient before the norm)
-        let mut d_x = self.norm.backward(&d_norm); // [seq][d_model]
+        let _d_x = self.norm.backward(&d_norm); // [seq][d_model]
 
         // ── STEP 3: Transformer blocks backward (reversed) ──────────────────
+        // TODO(backward): pass d_x through decoder blocks in reverse order, then
+        // scatter the final embedding gradient into token_emb and position_emb.
     }
 
     pub fn generate(&mut self, context: &[usize], max_new_tokens: usize) -> Vec<usize> {

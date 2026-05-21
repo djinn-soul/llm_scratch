@@ -27,6 +27,8 @@ use crate::common::util::matmul;
 pub struct FeedForward {
     pub w_1: Vec<Vec<f32>>, // [d_model][d_ff] expands per token
     pub w_2: Vec<Vec<f32>>, // [d_ff][d_model] shrinks per token
+    // TODO(backward): store forward caches and gradients for w_1/w_2 so the
+    // training loop can update both FFN matrices.
     pub d_model: usize,
     pub d_ff: usize,
 }
@@ -68,6 +70,9 @@ impl FeedForward {
         // Applied to every row via matmul → back to [seq_len][d_model]
         matmul(&activated, &self.w_2)
     }
+
+    // TODO(backward): implement reverse pass:
+    // d_out -> d_w2 + d_relu -> d_hidden -> d_w1 + d_x.
 }
 
 // ════════════════════════════════════════════════════════════════════════════

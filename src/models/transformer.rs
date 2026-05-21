@@ -37,6 +37,8 @@ pub struct Transformer {
     pub mha: MultiHeadAttention,
     pub layer_norm2: LayerNorm,
     pub ff: FeedForward,
+    // TODO(backward): cache residual inputs (`x`, `norm1`, `attention`, `h`,
+    // `norm2`) so the block can reverse residual and sublayer paths.
 }
 
 impl Transformer {
@@ -78,6 +80,10 @@ impl Transformer {
         // Output shape remains [seq_len][d_model], so blocks can be stacked.
         add_mat(&h, &ff)
     }
+
+    // TODO(backward): reverse the pre-norm block:
+    // d_output -> residual split -> FFN -> LayerNorm2 -> MHA residual
+    // -> MultiHeadAttention -> LayerNorm1 -> d_x.
 }
 
 // ════════════════════════════════════════════════════════════════════════════

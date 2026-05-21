@@ -5,12 +5,16 @@ use rand::RngExt;
 
 pub struct TokenEmbedding {
     weight: Vec<Vec<f32>>, //[vocab_size][d_model]
+    // TODO(backward): add weight gradients so repeated token IDs accumulate
+    // d_token_embedding during GPT training.
     pub vocab_size: usize,
     pub d_model: usize, // dimension of token embedding
 }
 
 pub struct PositionalEmbedding {
     weight: Vec<Vec<f32>>, // [max_seq_len][d_model]
+    // TODO(backward): add positional weight gradients so each position row
+    // receives the gradient from its matching sequence index.
     pub max_seq_len: usize,
     pub d_model: usize, // dimension of positional embedding
 }

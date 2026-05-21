@@ -28,6 +28,8 @@ use crate::common::util::{matmul, random_matrix};
 pub struct MultiHeadAttention {
     pub heads: Vec<SelfAttention>,
     pub w_o: Vec<Vec<f32>>, // [num_heads * d_v][d_model]
+    // TODO(backward): cache concatenated head outputs and add d_w_o so the
+    // output projection can be trained.
     pub num_heads: usize,
     pub d_model: usize,
 }
@@ -88,6 +90,9 @@ impl MultiHeadAttention {
         // it learns how to weight and blend the independent views into one.
         matmul(&concatenated, &self.w_o)
     }
+
+    // TODO(backward): split d_concatenated back into per-head gradients, call
+    // each head.backward(), sum their d_x values, and compute d_w_o.
 }
 
 // ════════════════════════════════════════════════════════════════════════════
