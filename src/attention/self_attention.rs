@@ -35,6 +35,18 @@ pub struct SelfAttention {
     pub d_model: usize, // dimension of the model
     pub d_k: usize,     // dimension of the key
     pub d_v: usize,     // dimension of the value
+
+    // Gradients (must exist for backward, even if unused for now).
+    pub d_w_q: Vec<Vec<f32>>,
+    pub d_w_k: Vec<Vec<f32>>,
+    pub d_w_v: Vec<Vec<f32>>,
+
+    // forward caches
+    cache_x: Vec<Vec<f32>>,
+    cache_q: Vec<Vec<f32>>,
+    cache_k: Vec<Vec<f32>>,
+    cache_v: Vec<Vec<f32>>,
+    cache_attention_weights: Vec<Vec<f32>>,
 }
 
 impl SelfAttention {
@@ -48,12 +60,21 @@ impl SelfAttention {
             d_model,
             d_k,
             d_v,
+            d_w_q: vec![vec![0.0; d_k]; d_model],
+            d_w_k: vec![vec![0.0; d_k]; d_model],
+            d_w_v: vec![vec![0.0; d_v]; d_model],
+            cache_x: Vec::new(),
+            cache_q: Vec::new(),
+            cache_k: Vec::new(),
+            cache_v: Vec::new(),
+            cache_attention_weights: Vec::new(),
         }
     }
 
     // Forward pass: x = [seq_len][d_model] → output [seq_len][d_v]
     // Same weights applied to every token; output blends the whole sequence.
-    pub fn forward(&self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    pub fn forward(&mut self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        self.cache_x = x.to_vec();
         // ── STEP 1: PROJECT ─────────────────────────────────────────────────
         // Multiply input by each learned matrix to get query/key/value views.
         //   q[i] = "what is token i looking for?"
@@ -63,6 +84,9 @@ impl SelfAttention {
         let k = matmul(&x.to_vec(), &self.w_k);
         let v = matmul(&x.to_vec(), &self.w_v);
 
+        self.cache_q = q.clone();
+        self.cache_k = k.clone();
+        self.cache_v = v.clone();
         // ── STEP 2: SCORE ───────────────────────────────────────────────────
         // Attention = softmax(Q @ K^T / sqrt(d_k)) @ V
         // Transpose K so columns become keys, then Q @ K^T gives a
@@ -104,16 +128,56 @@ impl SelfAttention {
             .map(|row| softmax(row))
             .collect::<Vec<Vec<f32>>>();
 
+        self.cache_attention_weights = attention_weights.clone();
+
         // ── STEP 5: BLEND ───────────────────────────────────────────────────
         // weighted sum of values = attention_weights @ V
         // output[i] = Σ_j attention_weights[i][j] * v[j]
         matmul(&attention_weights, &v)
     }
 
-    pub fn backward(&mut self, _d_out: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        todo!(
-            "SelfAttention::backward must reverse V blend, softmax, scores, and Q/K/V projections"
-        )
+    pub fn backward(&mut self, d_out: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        let v_t = mat_transpose(&self.cache_v);
+        let d_attention_w = matmul(&d_out.to_vec(), &v_t);
+        let a_t = mat_transpose(&self.cache_attention_weights);
+        let d_v = matmul(&a_t, &d_out.to_vec());
+
+        let seq_len = d_out.len();
+        let mut d_scaled = vec![vec![0.0; seq_len]; seq_len];
+
+        let k_t = mat_transpose(&self.cache_k);
+        let d_k_grad = matmul(&k_t, &d_out.to_vec());
+        let dk_sqrt = (self.d_k as f32).sqrt();
+
+        // softmax derivative
+        // d_scores[i][j]
+        // = P[i][j] * ( dP[i][j] - sum_k(dP[i][k] * P[i][k]) ) (optimized)
+        // non optimized (∂P_i/∂s_j = P_i (δ_ij - P_j))
+
+        for i in 0..seq_len {
+            let mut sum_dp = 0.0;
+            for k in 0..seq_len {
+                sum_dp += d_attention_w[i][k] * self.cache_attention_weights[i][k];
+            }
+            for j in 0..seq_len {
+                d_scaled[i][j] =
+                    self.cache_attention_weights[i][j] * (d_attention_w[i][j] - sum_dp);
+            }
+        }
+
+        // derivative casual mask
+
+        for i in 0..seq_len {
+            for j in 0..seq_len {
+                if j > i {
+                    d_scaled[i][j] = 0.0;
+                } else {
+                    d_scaled[i][j] /= dk_sqrt;
+                }
+            }
+        }
+
+        vec![vec![0.0; 10]; 10]
     }
 }
 

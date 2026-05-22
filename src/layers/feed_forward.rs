@@ -18,7 +18,7 @@
 // until back-propagation is added.
 // https://sebastianraschka.com/blog/2023/self-attention-from-scratch.html
 // ════════════════════════════════════════════════════════════════════════════
-use crate::common::util::matmul;
+use crate::common::util::{mat_transpose, matmul};
 
 // w_1: expansion weights  [d_model][d_ff]  — widens each token vector
 // w_2: shrink weights     [d_ff][d_model]  — restores original width
@@ -31,6 +31,13 @@ pub struct FeedForward {
     // training loop can update both FFN matrices.
     pub d_model: usize,
     pub d_ff: usize,
+    // ── Trains & Gradients ──
+    pub d_w1: Vec<Vec<f32>>, // Accumulated gradients for w_1
+    pub d_w2: Vec<Vec<f32>>, // Accumulated gradients for w_2
+    // ── Caches saved during forward() ──
+    cache_x: Vec<Vec<f32>>,         // Input: [seq_len][d_model]
+    cache_hidden: Vec<Vec<f32>>,    // Pre-ReLU: [seq_len][d_ff]
+    cache_activated: Vec<Vec<f32>>, // Post-ReLU: [seq_len]
 }
 
 impl FeedForward {
@@ -43,18 +50,25 @@ impl FeedForward {
             w_2,
             d_model,
             d_ff,
+            d_w1: vec![vec![0.0; d_ff]; d_model],
+            d_w2: vec![vec![0.0; d_model]; d_ff],
+            cache_x: Vec::new(),
+            cache_hidden: Vec::new(),
+            cache_activated: Vec::new(),
         }
     }
 
     // Forward pass: x = [seq_len][d_model] → output [seq_len][d_model]
     // Shape is preserved — FFN can be stacked or composed with attention freely.
-    pub fn forward(&self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    pub fn forward(&mut self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        self.cache_x = x.to_vec();
+
         // ── STEP 1: EXPAND ──────────────────────────────────────────────────
         // Each token row: [d_model] @ w_1[d_model][d_ff] → [d_ff]
         // Applied to every row at once via matmul → [seq_len][d_ff]
         // No mixing between tokens — every row is independent.
         let hidden = matmul(&x.to_vec(), &self.w_1);
-
+        self.cache_hidden = hidden.clone();
         // ── STEP 2: RELU ────────────────────────────────────────────────────
         // ReLU(x) = max(0, x) — element-wise, no weights involved.
         // Negative values become 0; positive values pass through unchanged.
@@ -64,15 +78,57 @@ impl FeedForward {
             .iter()
             .map(|row| row.iter().map(|v| v.max(0.0)).collect())
             .collect();
-
+        self.cache_activated = activated.clone();
         // ── STEP 3: SHRINK ──────────────────────────────────────────────────
         // Each activated row: [d_ff] @ w_2[d_ff][d_model] → [d_model]
         // Applied to every row via matmul → back to [seq_len][d_model]
         matmul(&activated, &self.w_2)
     }
 
-    pub fn backward(&mut self, _d_out: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        todo!("FeedForward::backward must compute d_w2, d_w1, and d_x")
+    //   [d_out] ──► 1. d_w2 = cache_activated^T @ d_out
+    //       ──► 2. d_activated = d_out @ w_2^T
+    //       ──► 3. d_hidden = d_activated * (cache_hidden > 0)
+    //       ──► 4. d_w1 = cache_x^T @ d_hidden
+    //       ──► 5. d_x = d_hidden @ w_1^T (flows left)
+
+    pub fn backward(&mut self, d_out: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        // 1. Backward through Shrink Layer (Step 3)
+        // Accumulate d_w2 gradient: activated^T @ d_out
+        let activated_t = mat_transpose(&self.cache_activated);
+        let batch_d_w2 = matmul(&activated_t, &d_out.to_vec());
+        for i in 0..self.d_ff {
+            for j in 0..self.d_model {
+                self.d_w2[i][j] += batch_d_w2[i][j];
+            }
+        }
+        // 2. Backward through ReLU Non-linearity (Step 2)
+        // ReLU backward
+        // if h_pre > 0:
+        //     gradient passes
+        // else:
+        //     gradient becomes 0
+        let w_2_t = mat_transpose(&self.w_2);
+        let d_activated = matmul(&w_2_t, &d_out.to_vec()); // Shape: [seq_len][d_ff]
+        let mut d_hidden = vec![vec![0.0; self.d_ff]; d_out.len()];
+        for i in 0..d_out.len() {
+            for j in 0..self.d_ff {
+                if self.cache_hidden[i][j] > 0.0 {
+                    d_hidden[i][j] = d_activated[i][j];
+                }
+            }
+        }
+        // 3. Backward through Expand Layer (Step 1)
+        // Accumulate d_w1 gradient: cache_x^T @ d_hidden
+        let w_1_t = mat_transpose(&self.w_1);
+        let d_x = matmul(&d_hidden, &w_1_t);
+        let x_t = mat_transpose(&self.cache_x);
+        let batch_d_w1 = matmul(&x_t, &d_hidden);
+        for i in 0..self.d_model {
+            for j in 0..self.d_ff {
+                self.d_w1[i][j] += batch_d_w1[i][j];
+            }
+        }
+        d_x
     }
 }
 

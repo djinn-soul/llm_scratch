@@ -9,7 +9,7 @@ fn main() {
     let tok = TokenEmbedding::new(1000, d_model);
     let pos = PositionalEmbedding::new(500, d_model);
     let x = embed_sequence(&[1, 2, 3], &tok, &pos);
-    let ff = FeedForward::new(
+    let mut ff = FeedForward::new(
         random_matrix(d_model, d_ff),
         random_matrix(d_ff, d_model),
         d_model,
