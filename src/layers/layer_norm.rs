@@ -114,6 +114,21 @@ impl LayerNorm {
     // 3. d_x (gradient flowing to previous layer)
     // Final dL/dx formula, per token row:
     // dL/dx = (d_xhat - mean(d_xhat) - x_hat * mean(d_xhat * x_hat)) / std
+
+    // Backward pass: d_out = [seq_len][d_model] -> d_x = [seq_len][d_model]
+    //
+    // This walks the forward algorithm in reverse:
+    //   forward  STEP 1 MEAN -> STEP 2 VARIANCE -> STEP 3 STDDEV
+    //            -> STEP 4 NORMALIZE -> STEP 5 RESCALE
+    //   backward STEP 5 RESCALE -> STEP 4 NORMALIZE
+    //            -> STEP 3/2/1 row-stat effects
+    //
+    // LayerNorm has a compact closed-form backward formula. Instead of
+    // separately storing mean and variance, it uses cached x_hat and std_dev
+    // from forward() to account for all row-level dependencies.
+    //
+    // Final per-token formula:
+    //   d_x = (d_xhat - mean(d_xhat) - x_hat * mean(d_xhat * x_hat)) / std
     pub fn backward(&mut self, d_out: &Vec<Vec<f32>>) -> Vec<Vec<f32>> {
         let n = self.gamma.len() as f32;
         let mut d_x: Vec<Vec<f32>> = Vec::with_capacity(d_out.len());
@@ -127,71 +142,72 @@ impl LayerNorm {
             let x_hat = &self.cache_x_hat[i];
             let std_dev = self.cache_std[i];
 
-            // ------------------------------------------------------------
-            // STEP 1:
-            // Compute gradient wrt gamma and beta
+            // ── BACKWARD: REVERSE FORWARD STEP 5 (RESCALE) ────────────────
+            // Forward STEP 5 did:
+            //   output = gamma * x_hat + beta
+            // Meaning:
+            //   normalized values were stretched by learned gamma and shifted
+            //   by learned beta, independently for each feature.
             //
-            // Forward:
-            // y = gamma * x_hat + beta
-            //
-            // d_gamma += d_out * x_hat
-            // d_beta  += d_out
-            // ------------------------------------------------------------
+            // Since output depended on gamma, beta, and x_hat:
+            //   d_gamma += d_out * x_hat
+            //   d_beta  += d_out
+            //   d_xhat   = d_out * gamma
             for j in 0..self.gamma.len() {
                 // dL/d_gamma
                 self.d_gamma[j] += d_out[i][j] * x_hat[j];
                 // dL/d_beta
                 self.d_beta[j] += d_out[i][j];
             }
-            // ------------------------------------------------------------
-            // STEP 2:
-            // Gradient wrt normalized values
-            //
-            // Since:
-            // y = gamma * x_hat
-            //
-            // d_xhat = d_out * gamma
-            // ------------------------------------------------------------
             let mut d_xhat = vec![0.0; self.gamma.len()];
             for j in 0..self.gamma.len() {
                 d_xhat[j] = d_out[i][j] * self.gamma[j];
             }
 
-            // ------------------------------------------------------------
-            // STEP 3:
-            // Compute helper sums
+            // ── BACKWARD: REVERSE FORWARD STEP 4 (NORMALIZE) ──────────────
+            // Forward STEP 4 did:
+            //   x_hat = (x - mean) / std
+            // Meaning:
+            //   every feature in this token row was centered by the same mean
+            //   and scaled by the same std_dev. That couples all features in
+            //   the row, so backward needs row-level sums, not independent
+            //   element-wise gradients.
             //
-            // These are needed because LayerNorm connects
-            // all features through mean and variance.
-            // ------------------------------------------------------------
-
+            // Helper sums:
+            //   sum_dxhat       = sum_j d_xhat[j]
+            //   sum_dxhat_xhat  = sum_j d_xhat[j] * x_hat[j]
+            //
+            // These compactly represent the mean and variance correction terms.
             let sum_dxhat: f32 = d_xhat.iter().sum();
             let sum_dxhat_xhat: f32 = d_xhat
                 .iter()
                 .zip(x_hat.iter())
                 .map(|(dxh, xh)| dxh * xh)
                 .sum();
-            // inverse std deviation
-            // 1 / sqrt(var + eps)
+
+            // ── BACKWARD: REVERSE FORWARD STEPS 3/2/1 (STDDEV/STATS) ──────
+            // Forward STEP 1 computed the row mean.
+            // Forward STEP 2 computed row variance from that mean.
+            // Forward STEP 3 computed std_dev = sqrt(variance + eps).
+            //
+            // Meaning:
+            //   changing one input feature changes the row mean and variance,
+            //   which then changes every normalized feature in that row.
+            //
+            // inv_std is the reverse scale for the forward division by std_dev.
             let inv_std = 1.0 / (std_dev);
 
-            // ------------------------------------------------------------
-            // STEP 4:
-            // Final LayerNorm backward formula
+            // Final LayerNorm backward formula:
+            //   dx = inv_std * (
+            //       d_xhat
+            //       - mean(d_xhat)
+            //       - x_hat * mean(d_xhat * x_hat)
+            //   )
             //
-            // dx =
-            // inv_std *
-            // (
-            //   d_xhat
-            //   - mean(d_xhat)
-            //   - x_hat * mean(d_xhat * x_hat)
-            // )
-            //
-            // This:
-            // 1. passes gradient through
-            // 2. removes mean effect
-            // 3. removes variance effect
-            // ------------------------------------------------------------
+            // Terms:
+            //   d_xhat                         direct gradient through normalize
+            //   - mean(d_xhat)                 correction for forward mean
+            //   - x_hat * mean(d_xhat*x_hat)   correction for forward variance
             let mut dx_inside = vec![0.0; self.gamma.len()];
             for j in 0..self.gamma.len() {
                 dx_inside[j] =

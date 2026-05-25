@@ -7,7 +7,7 @@ fn main() {
     let pos = PositionalEmbedding::new(512, d_model);
     let x = embed_sequence(&[45, 12, 300, 7], &tok, &pos);
 
-    let attn = SelfAttention::new(d_model, d_model, d_model);
+    let mut attn = SelfAttention::new(d_model, d_model, d_model);
     let out = attn.forward(&x);
 
     println!("Out shape: [{}][{}]", out.len(), out[0].len());

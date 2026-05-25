@@ -30,18 +30,18 @@ pub struct SelfAttention {
     pub w_q: Vec<Vec<f32>>,
     pub w_k: Vec<Vec<f32>>,
     pub w_v: Vec<Vec<f32>>,
-    // TODO(backward): store q/k/v, masked softmax weights, and gradients for
-    // w_q/w_k/w_v so attention can train.
     pub d_model: usize, // dimension of the model
     pub d_k: usize,     // dimension of the key
     pub d_v: usize,     // dimension of the value
 
-    // Gradients (must exist for backward, even if unused for now).
+    // Gradients accumulated by backward() so the training loop can update
+    // each learned projection matrix.
     pub d_w_q: Vec<Vec<f32>>,
     pub d_w_k: Vec<Vec<f32>>,
     pub d_w_v: Vec<Vec<f32>>,
 
-    // forward caches
+    // Forward caches needed by backward(): X, Q, K, V, and masked softmax
+    // weights from the most recent forward() call.
     cache_x: Vec<Vec<f32>>,
     cache_q: Vec<Vec<f32>>,
     cache_k: Vec<Vec<f32>>,
@@ -136,7 +136,35 @@ impl SelfAttention {
         matmul(&attention_weights, &v)
     }
 
+    // Backward pass: d_out = [seq_len][d_v] -> d_x = [seq_len][d_model]
+    //
+    // This walks the forward algorithm in reverse:
+    //   forward  STEP 1 PROJECT -> STEP 2 SCORE -> STEP 3 SCALE
+    //            -> CAUSAL MASK -> STEP 4 WEIGHT -> STEP 5 BLEND
+    //   backward STEP 5 BLEND -> STEP 4 WEIGHT -> MASK/STEP 3 SCALE
+    //            -> STEP 2 SCORE -> STEP 1 PROJECT
+    //
+    // Every cached value below came from the most recent forward() call. That
+    // matters because backprop needs the exact Q/K/V and attention weights that
+    // produced the current output, not freshly recomputed or random values.
     pub fn backward(&mut self, d_out: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        // ── BACKWARD: REVERSE FORWARD STEP 5 (BLEND) ───────────────────────
+        // Forward STEP 5 did:
+        //   output = attention_weights @ V
+        // Meaning:
+        //   each output token was built by mixing value vectors V using the
+        //   attention probabilities from STEP 4.
+        //
+        // d_out is the gradient arriving from the layer above. Since output
+        // depended on TWO inputs (attention_weights and V), the gradient splits:
+        //   d_attention_weights = d_out @ V^T
+        //   d_v                 = attention_weights^T @ d_out
+        //
+        // Shapes:
+        //   d_out              [seq_len][d_v]
+        //   V^T                [d_v][seq_len]
+        //   d_attention_w      [seq_len][seq_len]
+        //   d_v                [seq_len][d_v]
         let v_t = mat_transpose(&self.cache_v);
         let d_attention_w = matmul(&d_out.to_vec(), &v_t);
         let a_t = mat_transpose(&self.cache_attention_weights);
@@ -145,15 +173,31 @@ impl SelfAttention {
         let seq_len = d_out.len();
         let mut d_scaled = vec![vec![0.0; seq_len]; seq_len];
 
-        let k_t = mat_transpose(&self.cache_k);
-        let d_k_grad = matmul(&k_t, &d_out.to_vec());
         let dk_sqrt = (self.d_k as f32).sqrt();
 
-        // softmax derivative
-        // d_scores[i][j]
-        // = P[i][j] * ( dP[i][j] - sum_k(dP[i][k] * P[i][k]) ) (optimized)
-        // non optimized (∂P_i/∂s_j = P_i (δ_ij - P_j))
-
+        // ── BACKWARD: REVERSE FORWARD STEP 4 (WEIGHT / SOFTMAX) ────────────
+        // Forward STEP 4 did:
+        //   attention_weights[i] = softmax(scaled_scores[i])
+        // Meaning:
+        //   raw score row i became a probability row over all visible keys.
+        //   The probabilities in one row are linked because they all share the
+        //   same softmax denominator.
+        //
+        // Softmax is row-wise: each query row has its own probability
+        // distribution over keys. Changing one score in a row affects every
+        // probability in that same row, so the derivative is not just element-
+        // by-element multiplication.
+        //
+        // Optimized row formula:
+        //   d_scaled[i][j] =
+        //       P[i][j] * (dP[i][j] - sum_k(dP[i][k] * P[i][k]))
+        //
+        // where:
+        //   P  = cached attention_weights
+        //   dP = d_attention_w
+        //
+        // Same idea as the full Jacobian:
+        //   ∂P_j/∂s_k = P_j * (δ_jk - P_k)
         for i in 0..seq_len {
             let mut sum_dp = 0.0;
             for k in 0..seq_len {
@@ -165,8 +209,22 @@ impl SelfAttention {
             }
         }
 
-        // derivative casual mask
-
+        // ── BACKWARD: REVERSE CAUSAL MASK + FORWARD STEP 3 (SCALE) ─────────
+        // Forward masking did:
+        //   future-token scores were replaced with -inf before softmax
+        //
+        // Forward STEP 3 did:
+        //   scaled_scores = scores / sqrt(d_k)
+        //   scaled_scores[i][j] = -inf for future tokens j > i
+        // Meaning:
+        //   allowed score magnitudes were reduced before softmax, while future
+        //   positions were removed from the computation entirely.
+        //
+        // Future positions were blocked before softmax. Because they were not
+        // allowed to influence output, their gradients must stay exactly 0.
+        //
+        // For allowed positions, reverse the scale operation:
+        //   d_scores = d_scaled_scores / sqrt(d_k)
         for i in 0..seq_len {
             for j in 0..seq_len {
                 if j > i {
@@ -177,7 +235,88 @@ impl SelfAttention {
             }
         }
 
-        vec![vec![0.0; 10]; 10]
+        // ── BACKWARD: REVERSE FORWARD STEP 2 (SCORE) ───────────────────────
+        // Forward STEP 2 did:
+        //   scores = Q @ K^T
+        // Meaning:
+        //   each score[i][j] measured how strongly query token i matched key
+        //   token j. Since the score used both Q and K, its gradient must flow
+        //   back into both projection outputs.
+        //
+        // Matrix multiply backward:
+        //   d_q = d_scores @ K
+        //   d_k = d_scores^T @ Q
+        //
+        // Shapes:
+        //   d_scores [seq_len][seq_len]
+        //   K        [seq_len][d_k]
+        //   Q        [seq_len][d_k]
+        //   d_q/d_k  [seq_len][d_k]
+        let d_q = matmul(&d_scaled, &self.cache_k);
+        let d_scaled_t = mat_transpose(&d_scaled);
+        let d_k_grad = matmul(&d_scaled_t, &self.cache_q);
+
+        // ── BACKWARD: REVERSE FORWARD STEP 1 (PROJECT) ─────────────────────
+        // Forward STEP 1 did three independent projections from the same input:
+        //   Q = X @ W_Q
+        //   K = X @ W_K
+        //   V = X @ W_V
+        // Meaning:
+        //   X was copied into three branches, then each branch used a different
+        //   learned matrix to create a different view of the same tokens.
+        //
+        // Weight gradients use the cached input:
+        //   d_w_q = X^T @ d_q
+        //   d_w_k = X^T @ d_k
+        //   d_w_v = X^T @ d_v
+        //
+        // We add into d_w_* instead of assigning so multiple backward calls can
+        // accumulate gradients before the optimizer step.
+        let x_t = mat_transpose(&self.cache_x);
+        let batch_d_wq = matmul(&x_t, &d_q);
+        let batch_d_wk = matmul(&x_t, &d_k_grad);
+        let batch_q_wv = matmul(&x_t, &d_v);
+
+        for i in 0..self.d_model {
+            for j in 0..self.d_k {
+                self.d_w_q[i][j] += batch_d_wq[i][j];
+                self.d_w_k[i][j] += batch_d_wk[i][j];
+            }
+            for j in 0..self.d_v {
+                self.d_w_v[i][j] += batch_q_wv[i][j];
+            }
+        }
+
+        // ── RETURN GRADIENT TO THE PREVIOUS LAYER ──────────────────────────
+        // Forward connection this reverses:
+        //   the same X fed STEP 1's Q, K, and V projection branches.
+        //
+        // X fed all three projection branches. By the chain rule, when one
+        // value branches into several paths, its total gradient is the sum of
+        // the gradients returning from each path:
+        //   d_x = d_x_from_q + d_x_from_k + d_x_from_v
+        //
+        // Each branch reverses its projection:
+        //   d_x_from_q = d_q @ W_Q^T
+        //   d_x_from_k = d_k @ W_K^T
+        //   d_x_from_v = d_v @ W_V^T
+        let w_q_t = mat_transpose(&self.w_q);
+        let w_k_t = mat_transpose(&self.w_k);
+        let w_v_t = mat_transpose(&self.w_v);
+
+        let d_xq = matmul(&d_q, &w_q_t);
+        let d_xk = matmul(&d_k_grad, &w_k_t);
+        let d_xv = matmul(&d_v, &w_v_t);
+
+        let mut d_x = vec![vec![0.0; self.d_model]; seq_len];
+
+        for i in 0..seq_len {
+            for j in 0..self.d_model {
+                d_x[i][j] = d_xq[i][j] + d_xk[i][j] + d_xv[i][j];
+            }
+        }
+
+        d_x
     }
 }
 

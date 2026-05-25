@@ -7,7 +7,7 @@ fn main() {
     let pos = PositionalEmbedding::new(512, d_model);
     let x = embed_sequence(&[45, 12, 300, 7], &tok, &pos);
 
-    let mha = MultiHeadAttention::new(d_model, 8);
+    let mut mha = MultiHeadAttention::new(d_model, 8);
     let out = mha.forward(&x);
 
     println!("In:  [{}][{}]", x.len(), x[0].len());

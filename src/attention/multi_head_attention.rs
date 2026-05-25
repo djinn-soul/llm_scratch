@@ -64,12 +64,12 @@ impl MultiHeadAttention {
 
     // Forward pass: x = [seq_len][d_model] → output [seq_len][d_model]
     // Output width matches input width, so multi-head layers can be stacked.
-    pub fn forward(&self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    pub fn forward(&mut self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
         // ── PART 1: RUN EACH HEAD ───────────────────────────────────────────
         // Every head runs full attention on the same x, independently.
         //   head_outputs[h] = [seq_len][d_v]
         let head_outputs: Vec<Vec<Vec<f32>>> =
-            self.heads.iter().map(|head| head.forward(x)).collect();
+            self.heads.iter_mut().map(|head| head.forward(x)).collect();
 
         // ── PART 2: CONCAT ──────────────────────────────────────────────────
         // Glue head outputs side by side, per row:
@@ -91,6 +91,18 @@ impl MultiHeadAttention {
         matmul(&concatenated, &self.w_o)
     }
 
+    // Backward pass roadmap for multi-head attention:
+    //   1. MIX     output = concatenated_heads @ w_o
+    //      -> accumulate d_w_o and compute d_concatenated_heads
+    //   2. CONCAT  split d_concatenated_heads back into one slice per head
+    //      -> each slice has shape [seq_len][d_v]
+    //   3. RUN     call each head.backward(slice)
+    //      -> every head returns an input gradient [seq_len][d_model]
+    //   4. SUM     all heads saw the same input X
+    //      -> add the per-head d_x values into the final d_x
+    //
+    // Still todo because forward() must cache the concatenated head output and
+    // this struct must own d_w_o before the output projection can train.
     pub fn backward(&mut self, _d_out: &[Vec<f32>]) -> Vec<Vec<f32>> {
         todo!("MultiHeadAttention::backward must split head grads, sum d_x, and compute d_w_o")
     }

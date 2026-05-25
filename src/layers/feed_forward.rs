@@ -27,11 +27,10 @@ use crate::common::util::{mat_transpose, matmul};
 pub struct FeedForward {
     pub w_1: Vec<Vec<f32>>, // [d_model][d_ff] expands per token
     pub w_2: Vec<Vec<f32>>, // [d_ff][d_model] shrinks per token
-    // TODO(backward): store forward caches and gradients for w_1/w_2 so the
-    // training loop can update both FFN matrices.
     pub d_model: usize,
     pub d_ff: usize,
-    // ── Trains & Gradients ──
+    // ── Trainable gradients ──
+    // Accumulated by backward() so the optimizer can update w_1 and w_2.
     pub d_w1: Vec<Vec<f32>>, // Accumulated gradients for w_1
     pub d_w2: Vec<Vec<f32>>, // Accumulated gradients for w_2
     // ── Caches saved during forward() ──
@@ -85,30 +84,51 @@ impl FeedForward {
         matmul(&activated, &self.w_2)
     }
 
-    //   [d_out] ──► 1. d_w2 = cache_activated^T @ d_out
-    //       ──► 2. d_activated = d_out @ w_2^T
-    //       ──► 3. d_hidden = d_activated * (cache_hidden > 0)
-    //       ──► 4. d_w1 = cache_x^T @ d_hidden
-    //       ──► 5. d_x = d_hidden @ w_1^T (flows left)
-
+    // Backward pass: d_out = [seq_len][d_model] -> d_x = [seq_len][d_model]
+    //
+    // This walks the forward algorithm in reverse:
+    //   forward  STEP 1 EXPAND -> STEP 2 RELU -> STEP 3 SHRINK
+    //   backward STEP 3 SHRINK -> STEP 2 RELU -> STEP 1 EXPAND
+    //
+    // The forward pass cached both the pre-ReLU hidden values and the
+    // post-ReLU activated values. Backward needs both: activated values train
+    // w_2, while pre-ReLU hidden values decide where ReLU passes gradient.
     pub fn backward(&mut self, d_out: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        // 1. Backward through Shrink Layer (Step 3)
-        // Accumulate d_w2 gradient: activated^T @ d_out
+        // ── BACKWARD: REVERSE FORWARD STEP 3 (SHRINK) ──────────────────────
+        // Forward STEP 3 did:
+        //   output = activated @ W_2
+        // Meaning:
+        //   each token's hidden vector [d_ff] was projected back to d_model so
+        //   the FFN output can plug into the residual transformer stack.
+        //
+        // Since output depended on both activated and W_2:
+        //   d_w2        = activated^T @ d_out
+        //   d_activated = d_out @ W_2^T
+        //
+        // Shapes:
+        //   activated^T [d_ff][seq_len]
+        //   d_out       [seq_len][d_model]
+        //   d_w2        [d_ff][d_model]
         let activated_t = mat_transpose(&self.cache_activated);
         let batch_d_w2 = matmul(&activated_t, &d_out.to_vec());
+        let w_2_t = mat_transpose(&self.w_2);
+        let d_activated = matmul(&d_out.to_vec(), &w_2_t);
         for i in 0..self.d_ff {
             for j in 0..self.d_model {
                 self.d_w2[i][j] += batch_d_w2[i][j];
             }
         }
-        // 2. Backward through ReLU Non-linearity (Step 2)
-        // ReLU backward
-        // if h_pre > 0:
-        //     gradient passes
-        // else:
-        //     gradient becomes 0
-        let w_2_t = mat_transpose(&self.w_2);
-        let d_activated = matmul(&w_2_t, &d_out.to_vec()); // Shape: [seq_len][d_ff]
+
+        // ── BACKWARD: REVERSE FORWARD STEP 2 (RELU) ────────────────────────
+        // Forward STEP 2 did:
+        //   activated = max(0, hidden)
+        // Meaning:
+        //   positive hidden values passed through unchanged, while negative
+        //   hidden values were clipped to 0.
+        //
+        // ReLU backward uses the cached pre-ReLU hidden value:
+        //   if hidden > 0: gradient passes through
+        //   else:          gradient becomes 0
         let mut d_hidden = vec![vec![0.0; self.d_ff]; d_out.len()];
         for i in 0..d_out.len() {
             for j in 0..self.d_ff {
@@ -117,8 +137,20 @@ impl FeedForward {
                 }
             }
         }
-        // 3. Backward through Expand Layer (Step 1)
-        // Accumulate d_w1 gradient: cache_x^T @ d_hidden
+
+        // ── BACKWARD: REVERSE FORWARD STEP 1 (EXPAND) ──────────────────────
+        // Forward STEP 1 did:
+        //   hidden = X @ W_1
+        // Meaning:
+        //   each token row was widened from d_model to d_ff so the FFN had more
+        //   capacity before shrinking back.
+        //
+        // Since hidden depended on both X and W_1:
+        //   d_w1 = X^T @ d_hidden
+        //   d_x  = d_hidden @ W_1^T
+        //
+        // d_x is returned to the previous layer; d_w1 accumulates for the
+        // optimizer step.
         let w_1_t = mat_transpose(&self.w_1);
         let d_x = matmul(&d_hidden, &w_1_t);
         let x_t = mat_transpose(&self.cache_x);
