@@ -39,6 +39,7 @@ pub struct Transformer {
     pub ff: FeedForward,
     // TODO(backward): cache residual inputs (`x`, `norm1`, `attention`, `h`,
     // `norm2`) so the block can reverse residual and sublayer paths.
+    
 }
 
 impl Transformer {

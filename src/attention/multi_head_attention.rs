@@ -20,7 +20,7 @@
 // https://machinelearningmastery.com/the-attention-mechanism-from-scratch/
 // ════════════════════════════════════════════════════════════════════════════
 use crate::attention::self_attention::SelfAttention;
-use crate::common::util::{matmul, random_matrix};
+use crate::common::util::{mat_transpose, matmul, random_matrix};
 // heads:     num_heads independent SelfAttention layers, each width d_model/num_heads
 // w_o:       output projection, shape [num_heads * d_v][d_model] — mixes heads
 // num_heads: how many parallel heads (d_model must divide evenly by this)
@@ -32,6 +32,11 @@ pub struct MultiHeadAttention {
     // output projection can be trained.
     pub num_heads: usize,
     pub d_model: usize,
+
+    // ── Weight Gradients ──
+    pub d_w_o: Vec<Vec<f32>>, // Accumulated gradients for w_o: [num_heads * d_v][d_model
+    // ── Forward Caches ──
+    cache_concatenated: Vec<Vec<f32>>, // Cached concatenated heads: [seq_len][num_heads * d_v]
 }
 
 impl MultiHeadAttention {
@@ -59,6 +64,8 @@ impl MultiHeadAttention {
             w_o: w_o,
             num_heads,
             d_model,
+            d_w_o: vec![vec![0.0; d_model]; num_heads * d_v], // Gradients initialized to 0.0
+            cache_concatenated: Vec::new(),
         }
     }
 
@@ -85,6 +92,7 @@ impl MultiHeadAttention {
             concatenated.push(row);
         }
 
+        self.cache_concatenated = concatenated.clone();
         // ── PART 3: MIX ─────────────────────────────────────────────────────
         // concat @ w_o → [seq_len][d_model]. w_o lets the heads "talk":
         // it learns how to weight and blend the independent views into one.
@@ -103,8 +111,48 @@ impl MultiHeadAttention {
     //
     // Still todo because forward() must cache the concatenated head output and
     // this struct must own d_w_o before the output projection can train.
-    pub fn backward(&mut self, _d_out: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        todo!("MultiHeadAttention::backward must split head grads, sum d_x, and compute d_w_o")
+    pub fn backward(&mut self, d_out: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        let seq_len = d_out.len();
+        let d_v = self.d_model / self.num_heads;
+
+        let total_concat_dim = self.num_heads * d_v;
+        let concatenated = self.cache_concatenated.clone();
+
+        // ── STEP 1: COMPUTE d_w_o and d_concatenated_heads ─────────────────
+        // Step 1: d_w_o <- concat_t @ d_out
+        let concat_t = mat_transpose(&concatenated);
+        let batch_w_o = matmul(&concat_t, &d_out.to_vec());
+
+        // accumalate gradients into self.d_w_o
+        for i in 0..total_concat_dim {
+            for j in 0..self.d_model {
+                self.d_w_o[i][j] += batch_w_o[i][j];
+            }
+        }
+
+        let w_o_t = mat_transpose(&self.w_o);
+        let d_concatenated = matmul(&d_out.to_vec(), &w_o_t);
+        let mut d_x = vec![vec![0.0; self.d_model]; seq_len];
+
+        for h in 0..self.num_heads {
+            // Step 2: Extract head h's slice of shape [seq_len][d_v] from d_concatenated
+            let mut d_head_out = vec![vec![0.0; d_v]; seq_len];
+            for i in 0..seq_len {
+                for j in 0..d_v {
+                    d_head_out[i][j] = d_concatenated[i][h * d_v + j];
+                }
+            }
+            // Step 3: Run backward on head h to get its input gradient [seq_len][d_model]
+            let d_x_head = self.heads[h].backward(&d_head_out);
+
+            // Step 4: Sum into d_x (all heads saw same X, so accumulate grads)
+            for i in 0..seq_len {
+                for j in 0..self.d_model {
+                    d_x[i][j] += d_x_head[i][j];
+                }
+            }
+        }
+        d_x
     }
 }
 
