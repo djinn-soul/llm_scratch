@@ -1,5 +1,6 @@
 use std::fs;
 use std::io::{self, Write};
+use std::time::Instant;
 
 use llm_scratch_rs::{
     common::{
@@ -55,7 +56,7 @@ fn main() {
     let num_heads = 2;
     let d_ff = 32;
     let num_blocks = 2;
-    let learning_rate = 0.05;
+    let learning_rate = 0.01;
 
     let mut gpt = GPT::new(
         vocab_size,
@@ -80,6 +81,7 @@ fn main() {
         initial_loss
     );
     // 7. Training Loop using our manual backpropagation and DataLoader
+    let start_time = Instant::now();
     println!("\n[3/5] Starting manual backpropagation training loop...");
     let epochs = 80;
     for epoch in 1..=epochs {
@@ -139,8 +141,10 @@ fn main() {
         "\n[5/5] Final decoded sequence:\n  \"{}\"",
         decoded_result.trim()
     );
-
+    
+    let elapsed = start_time.elapsed();
     println!(
-        "\n🎉 Training complete! The model successfully memorized and reproduced the sequence."
+        "\n🎉 Training complete in {:.2?}! The model successfully memorized and reproduced the sequence.",
+        elapsed
     );
 }
