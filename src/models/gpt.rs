@@ -47,11 +47,14 @@ pub struct GPT {
     // during updates, then route lm_head gradients into token embedding grads.
 
     // ── Activations saved during forward(), used by backward() ──
+    // BACKWARD: these caches preserve the forward pass context so gradients
+    // can travel back through the same model path.
     cache_embed: Vec<Vec<f32>>,
     cache_blocks: Vec<Vec<Vec<f32>>>,
     cache_norm: Vec<Vec<f32>>,
-    // TODO(backward): cache token IDs/positions so embedding gradients can be
-    // scattered back to token and positional embedding tables.
+    // BACKWARD: token IDs from the latest forward pass are needed to scatter
+    // bottom-level gradients back into token and position embedding tables.
+    cache_tokens: Vec<usize>,
 }
 
 impl GPT {
@@ -91,6 +94,7 @@ impl GPT {
             cache_blocks: Vec::new(),
             cache_embed: Vec::new(),
             cache_norm: Vec::new(),
+            cache_tokens: Vec::new(),
         }
     }
     pub fn forward(&mut self, tokens: &[usize]) -> Vec<Vec<f32>> {
@@ -98,6 +102,9 @@ impl GPT {
         self.cache_embed.clear();
         self.cache_blocks.clear();
         self.cache_norm.clear();
+        // BACKWARD: keep token IDs so the embedding layer knows which rows
+        // receive gradients during the final scatter step.
+        self.cache_tokens = tokens.to_vec();
 
         // ── STEP 1: EMBED TOKEN IDS ─────────────────────────────────────────
         // Combine token identity with absolute position information.
@@ -114,7 +121,8 @@ impl GPT {
         // ── STEP 3: FINAL NORMALIZATION ─────────────────────────────────────
         // GPT-style models normalize before the final vocabulary projection.
         let x = self.norm.forward(&x);
-        self.cache_norm = x.clone(); // ← AFTER norm ✅
+        // BACKWARD: final hidden states are needed for lm_head_grad.
+        self.cache_norm = x.clone();
 
         // ── STEP 4: PROJECT TO VOCABULARY LOGITS ────────────────────────────
         // One row of logits per input token position.
@@ -122,14 +130,7 @@ impl GPT {
     }
 
     pub fn backward(&mut self, d_logits: &Vec<Vec<f32>>) {
-        // 1. Calculate gradient for lm_head and project back into last residual stream
-
-        // ── STEP 1: CALCULATE dL/dLm ─────────────────────────────────────
-        // We have dL/d_logits. We need to compute dL/d_lm_head using:
-        // dL/d_lm_head = dL/d_logits * d_logits/d_lm_head
-        // This is equivalent to matmul(d_logits^T, hidden_final) using the chain rule.
-
-        // ── STEP 1: CALCULATE dL/dLm ─────────────────────────────────────
+        // ── STEP 1: LANGUAGE-MODEL HEAD BACKWARD ──────────────────────────
         // Forward:   logits    = cache_norm @ lm_head
         // Backward:  d_norm    = d_logits  @ lm_head^T   (flows left)
         //            d_lm_head = cache_norm^T @ d_logits  (weight gradient)
@@ -139,14 +140,22 @@ impl GPT {
         // d_hidden_final_from_logits has shape [seq_len][d_model]
         let lm_head_t = mat_transpose(&self.lm_head);
         let d_norm = matmul(d_logits, &lm_head_t);
+
         // ── STEP 2: LayerNorm backward ──────────────────────────────────────
-        // d_norm flows into LayerNorm, gives d_x (gradient before the norm)
-        let _d_x = self.norm.backward(&d_norm); // [seq][d_model]
+        // d_norm flows through the final LayerNorm into the decoder stack.
+        let mut d_x = self.norm.backward(&d_norm);
 
         // ── STEP 3: Transformer blocks backward (reversed) ──────────────────
-        // TODO(backward): pass d_x through decoder blocks in reverse order, then
-        // scatter the final embedding gradient into token_emb and position_emb.
-        todo!("GPT::backward must reverse decoder blocks and scatter embedding gradients")
+        // Backprop runs from the last decoder block down to the first.
+        for block in self.blocks.iter_mut().rev() {
+            d_x = block.backward(&d_x);
+        }
+
+        // ── STEP 4: Embedding scatter backward ──────────────────────────────
+        // Route bottom-level gradients into token rows and position rows.
+        let seq_len = self.cache_tokens.len();
+        self.token_emb.backward(&self.cache_tokens, &d_x);
+        self.position_emb.backward(seq_len, &d_x);
     }
 
     pub fn generate(&mut self, context: &[usize], max_new_tokens: usize) -> Vec<usize> {

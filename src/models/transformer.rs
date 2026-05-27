@@ -37,9 +37,9 @@ pub struct Transformer {
     pub mha: MultiHeadAttention,
     pub layer_norm2: LayerNorm,
     pub ff: FeedForward,
-    // TODO(backward): cache residual inputs (`x`, `norm1`, `attention`, `h`,
-    // `norm2`) so the block can reverse residual and sublayer paths.
-    
+    // BACKWARD: residual adds have derivative 1 on both branches, while
+    // LayerNorm, attention, and feed-forward keep their own forward caches.
+    // This block only has to route and merge gradients in reverse order.
 }
 
 impl Transformer {
@@ -82,8 +82,31 @@ impl Transformer {
         add_mat(&h, &ff)
     }
 
-    pub fn backward(&mut self, _d_output: &[Vec<f32>]) -> Vec<Vec<f32>> {
-        todo!("Transformer::backward must reverse FFN, LayerNorm2, MHA, LayerNorm1, and residuals")
+    pub fn backward(&mut self, d_output: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        // STEP 1: reverse the second residual add.
+        // output = h + ff, so d_output flows into both the direct residual
+        // branch and the feed-forward branch.
+        let d_ff = d_output.to_vec();
+        let d_norm2 = self.ff.backward(&d_ff);
+
+        // STEP 2: move the feed-forward branch through the second LayerNorm.
+        let d_h_from_norm2 = self.layer_norm2.backward(&d_norm2);
+
+        // STEP 3: merge gradients for the intermediate residual stream `h`.
+        // d_h = d_output from the residual branch + d_h_from_norm2 from MLP.
+        let d_h = add_mat(&d_output.to_vec(), &d_h_from_norm2);
+
+        // STEP 4: reverse the first residual add and attention branch.
+        // h = x + attention, so d_h flows into attention and the direct x path.
+        let d_attention = d_h.clone();
+        let d_norm1 = self.mha.backward(&d_attention);
+
+        // STEP 5: move the attention branch through the first LayerNorm.
+        let d_x_norm1 = self.layer_norm.backward(&d_norm1);
+
+        // STEP 6: merge gradients for the block input `x`.
+        // d_x = d_h from the residual branch + d_x_norm1 from attention.
+        add_mat(&d_h, &d_x_norm1)
     }
 }
 

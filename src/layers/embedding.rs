@@ -5,16 +5,22 @@ use rand::RngExt;
 
 pub struct TokenEmbedding {
     weight: Vec<Vec<f32>>, //[vocab_size][d_model]
-    // TODO(backward): add weight gradients so repeated token IDs accumulate
-    // d_token_embedding during GPT training.
+    // BACKWARD: gradient table mirrors `weight`.
+    // Each output-row gradient is scattered back into its token row; repeated
+    // token IDs accumulate into the same `d_weight[token_id]` row.
+    pub d_weight: Vec<Vec<f32>>, //[vocab_size][d_model]
+
     pub vocab_size: usize,
     pub d_model: usize, // dimension of token embedding
 }
 
 pub struct PositionalEmbedding {
     weight: Vec<Vec<f32>>, // [max_seq_len][d_model]
-    // TODO(backward): add positional weight gradients so each position row
-    // receives the gradient from its matching sequence index.
+    // BACKWARD: gradient table mirrors `weight`.
+    // Each sequence position accumulates into the matching absolute-position
+    // row: position 0 -> d_weight[0], position 1 -> d_weight[1], etc.
+    pub d_weight: Vec<Vec<f32>>, // [max_seq_len][d_model]
+
     pub max_seq_len: usize,
     pub d_model: usize, // dimension of positional embedding
 }
@@ -27,6 +33,9 @@ impl TokenEmbedding {
             .collect();
         Self {
             weight,
+            // Start with no accumulated gradients; backward adds into rows.
+            d_weight: vec![vec![0.0; d_model]; vocab_size],
+
             vocab_size,
             d_model,
         }
@@ -35,8 +44,17 @@ impl TokenEmbedding {
         self.weight[ids].clone()
     }
 
-    pub fn backward(&mut self, _ids: &[usize], _d_out: &[Vec<f32>]) {
-        todo!("TokenEmbedding::backward must scatter gradients into token rows")
+    pub fn backward(&mut self, ids: &[usize], d_out: &[Vec<f32>]) {
+        // ── BACKWARD: TOKEN EMBEDDING SCATTER ──────────────────────────────
+        // Forward copies weight[token_id] into the sequence output.
+        // Backward sends each output-row gradient back into that same token row.
+        // If a token appears more than once, each occurrence adds to the row.
+        for i in 0..ids.len() {
+            let token_id = ids[i];
+            for j in 0..self.d_model {
+                self.d_weight[token_id][j] += d_out[i][j];
+            }
+        }
     }
 
     pub fn transposed_weight(&self) -> Vec<Vec<f32>> {
@@ -59,6 +77,8 @@ impl PositionalEmbedding {
             .collect();
         Self {
             weight,
+            // Start with no accumulated gradients; backward adds into rows.
+            d_weight: vec![vec![0.0; d_model]; max_seq_len],
             max_seq_len,
             d_model,
         }
@@ -67,8 +87,16 @@ impl PositionalEmbedding {
         self.weight[ids].clone()
     }
 
-    pub fn backward(&mut self, _seq_len: usize, _d_out: &[Vec<f32>]) {
-        todo!("PositionalEmbedding::backward must scatter gradients into position rows")
+    pub fn backward(&mut self, seq_len: usize, d_out: &[Vec<f32>]) {
+        // ── BACKWARD: POSITION EMBEDDING SCATTER ───────────────────────────
+        // Forward copies weight[position] into the sequence output.
+        // Backward sends each position's gradient back into its matching row:
+        // d_out[0] -> position 0, d_out[1] -> position 1, and so on.
+        for i in 0..seq_len {
+            for j in 0..self.d_model {
+                self.d_weight[i][j] += d_out[i][j];
+            }
+        }
     }
 }
 

@@ -36,8 +36,8 @@ pub struct LayerNorm {
 
     cache_x_hat: Vec<Vec<f32>>, // normalized values per row, before gamma/beta
     cache_std: Vec<f32>,        // std_dev per row
-    d_gamma: Vec<f32>,
-    d_beta: Vec<f32>,
+    pub d_gamma: Vec<f32>,
+    pub d_beta: Vec<f32>,
 }
 
 impl LayerNorm {
