@@ -21,6 +21,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 
 use crate::attention::multi_head_attention::MultiHeadAttention;
+use crate::common::optimizers::Param;
 use crate::common::util::{add_mat, random_matrix};
 use crate::layers::feed_forward::FeedForward;
 use crate::layers::layer_norm::LayerNorm;
@@ -107,6 +108,15 @@ impl Transformer {
         // STEP 6: merge gradients for the block input `x`.
         // d_x = d_h from the residual branch + d_x_norm1 from attention.
         add_mat(&d_h, &d_x_norm1)
+    }
+
+    pub fn parameters(&mut self) -> Vec<&mut Param> {
+        let mut params = Vec::new();
+        params.extend(self.layer_norm.parameters());
+        params.extend(self.mha.parameters());
+        params.extend(self.layer_norm2.parameters());
+        params.extend(self.ff.parameters());
+        params
     }
 }
 

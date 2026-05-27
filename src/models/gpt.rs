@@ -23,6 +23,7 @@
 // https://sebastianraschka.com/llms-from-scratch/
 // ════════════════════════════════════════════════════════════════════════════
 
+use crate::common::optimizers::Param;
 use crate::common::util::mat_transpose;
 use crate::common::util::matmul;
 use crate::layers::embedding::{embed_sequence, PositionalEmbedding, TokenEmbedding};
@@ -41,8 +42,7 @@ pub struct GPT {
     pub position_emb: PositionalEmbedding,
     pub blocks: Vec<Transformer>,
     pub norm: LayerNorm,
-    pub lm_head: Vec<Vec<f32>>,
-    pub lm_head_grad: Vec<Vec<f32>>,
+    pub lm_head: Param,
     // TODO(backward): decide whether lm_head stays tied to token_emb weights
     // during updates, then route lm_head gradients into token embedding grads.
 
@@ -82,15 +82,14 @@ impl GPT {
         let norm = LayerNorm::new(d_model);
 
         // 5. Language-model head: ties output projection to token embeddings. (weight tying)
-        let lm_head = token_emb.transposed_weight();
+        let lm_head_data = token_emb.transposed_weight();
 
         Self {
             token_emb,
             position_emb,
             blocks,
             norm,
-            lm_head,
-            lm_head_grad: vec![vec![0.0; vocab_size]; d_model],
+            lm_head: Param::new(lm_head_data, vec![vec![0.0; vocab_size]; d_model]),
             cache_blocks: Vec::new(),
             cache_embed: Vec::new(),
             cache_norm: Vec::new(),
@@ -126,7 +125,7 @@ impl GPT {
 
         // ── STEP 4: PROJECT TO VOCABULARY LOGITS ────────────────────────────
         // One row of logits per input token position.
-        matmul(&x, &self.lm_head)
+        matmul(&x, &self.lm_head.data)
     }
 
     pub fn backward(&mut self, d_logits: &Vec<Vec<f32>>) {
@@ -135,10 +134,10 @@ impl GPT {
         // Backward:  d_norm    = d_logits  @ lm_head^T   (flows left)
         //            d_lm_head = cache_norm^T @ d_logits  (weight gradient)
         let norm_t = mat_transpose(&self.cache_norm);
-        self.lm_head_grad = matmul(&norm_t, d_logits);
+        self.lm_head.grad = matmul(&norm_t, d_logits);
 
         // d_hidden_final_from_logits has shape [seq_len][d_model]
-        let lm_head_t = mat_transpose(&self.lm_head);
+        let lm_head_t = mat_transpose(&self.lm_head.data);
         let d_norm = matmul(d_logits, &lm_head_t);
 
         // ── STEP 2: LayerNorm backward ──────────────────────────────────────
@@ -193,6 +192,18 @@ impl GPT {
             tokens.push(best_id);
         }
         tokens
+    }
+
+    pub fn parameters(&mut self) -> Vec<&mut Param> {
+        let mut params = Vec::new();
+        params.extend(self.token_emb.parameters());
+        params.extend(self.position_emb.parameters());
+        for block in &mut self.blocks {
+            params.extend(block.parameters());
+        }
+        params.extend(self.norm.parameters());
+        params.push(&mut self.lm_head);
+        params
     }
 }
 

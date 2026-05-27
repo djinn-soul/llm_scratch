@@ -20,21 +20,21 @@
 // https://machinelearningmastery.com/the-attention-mechanism-from-scratch/
 // ════════════════════════════════════════════════════════════════════════════
 use crate::attention::self_attention::SelfAttention;
+use crate::common::optimizers::Param;
 use crate::common::util::{mat_transpose, matmul, random_matrix};
+
 // heads:     num_heads independent SelfAttention layers, each width d_model/num_heads
 // w_o:       output projection, shape [num_heads * d_v][d_model] — mixes heads
 // num_heads: how many parallel heads (d_model must divide evenly by this)
 // d_model:   model width — input and output stay this wide
 pub struct MultiHeadAttention {
     pub heads: Vec<SelfAttention>,
-    pub w_o: Vec<Vec<f32>>, // [num_heads * d_v][d_model]
+    pub w_o: Param, // [num_heads * d_v][d_model]
     // TODO(backward): cache concatenated head outputs and add d_w_o so the
     // output projection can be trained.
     pub num_heads: usize,
     pub d_model: usize,
 
-    // ── Weight Gradients ──
-    pub d_w_o: Vec<Vec<f32>>, // Accumulated gradients for w_o: [num_heads * d_v][d_model
     // ── Forward Caches ──
     cache_concatenated: Vec<Vec<f32>>, // Cached concatenated heads: [seq_len][num_heads * d_v]
 }
@@ -61,10 +61,9 @@ impl MultiHeadAttention {
 
         Self {
             heads,
-            w_o: w_o,
+            w_o: Param::new(w_o, vec![vec![0.0; d_model]; num_heads * d_v]), // Gradients initialized to 0.0
             num_heads,
             d_model,
-            d_w_o: vec![vec![0.0; d_model]; num_heads * d_v], // Gradients initialized to 0.0
             cache_concatenated: Vec::new(),
         }
     }
@@ -96,7 +95,7 @@ impl MultiHeadAttention {
         // ── PART 3: MIX ─────────────────────────────────────────────────────
         // concat @ w_o → [seq_len][d_model]. w_o lets the heads "talk":
         // it learns how to weight and blend the independent views into one.
-        matmul(&concatenated, &self.w_o)
+        matmul(&concatenated, &self.w_o.data)
     }
 
     // Backward pass roadmap for multi-head attention:
@@ -126,11 +125,11 @@ impl MultiHeadAttention {
         // accumalate gradients into self.d_w_o
         for i in 0..total_concat_dim {
             for j in 0..self.d_model {
-                self.d_w_o[i][j] += batch_w_o[i][j];
+                self.w_o.grad[i][j] += batch_w_o[i][j];
             }
         }
 
-        let w_o_t = mat_transpose(&self.w_o);
+        let w_o_t = mat_transpose(&self.w_o.data);
         let d_concatenated = matmul(&d_out.to_vec(), &w_o_t);
         let mut d_x = vec![vec![0.0; self.d_model]; seq_len];
 
@@ -153,6 +152,13 @@ impl MultiHeadAttention {
             }
         }
         d_x
+    }
+    pub fn parameters(&mut self) -> Vec<&mut Param> {
+        let mut params = vec![&mut self.w_o];
+        for head in &mut self.heads {
+            params.extend(head.parameters());
+        }
+        params
     }
 }
 

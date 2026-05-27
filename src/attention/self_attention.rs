@@ -21,24 +21,20 @@
 // ════════════════════════════════════════════════════════════════════════════
 
 use crate::common::activation::softmax;
+use crate::common::optimizers::Param;
 use crate::common::util::{mat_transpose, matmul, random_matrix};
+
 // w_q / w_k / w_v: learned projection matrices, shape [d_model][d_k or d_v]
 // d_model: width of each input token vector (e.g. 64)
 // d_k:     width of query/key vectors — controls score-space dimension
 // d_v:     width of value vectors — controls output dimension
 pub struct SelfAttention {
-    pub w_q: Vec<Vec<f32>>,
-    pub w_k: Vec<Vec<f32>>,
-    pub w_v: Vec<Vec<f32>>,
+    pub w_q: Param,
+    pub w_k: Param,
+    pub w_v: Param,
     pub d_model: usize, // dimension of the model
     pub d_k: usize,     // dimension of the key
     pub d_v: usize,     // dimension of the value
-
-    // Gradients accumulated by backward() so the training loop can update
-    // each learned projection matrix.
-    pub d_w_q: Vec<Vec<f32>>,
-    pub d_w_k: Vec<Vec<f32>>,
-    pub d_w_v: Vec<Vec<f32>>,
 
     // Forward caches needed by backward(): X, Q, K, V, and masked softmax
     // weights from the most recent forward() call.
@@ -54,15 +50,12 @@ impl SelfAttention {
     // reused for every forward pass (they only change during training).
     pub fn new(d_model: usize, d_k: usize, d_v: usize) -> SelfAttention {
         SelfAttention {
-            w_q: random_matrix(d_model, d_k),
-            w_k: random_matrix(d_model, d_k),
-            w_v: random_matrix(d_model, d_v),
+            w_q: Param::new(random_matrix(d_model, d_k), vec![vec![0.0; d_k]; d_model]),
+            w_k: Param::new(random_matrix(d_model, d_k), vec![vec![0.0; d_k]; d_model]),
+            w_v: Param::new(random_matrix(d_model, d_v), vec![vec![0.0; d_v]; d_model]),
             d_model,
             d_k,
             d_v,
-            d_w_q: vec![vec![0.0; d_k]; d_model],
-            d_w_k: vec![vec![0.0; d_k]; d_model],
-            d_w_v: vec![vec![0.0; d_v]; d_model],
             cache_x: Vec::new(),
             cache_q: Vec::new(),
             cache_k: Vec::new(),
@@ -80,9 +73,9 @@ impl SelfAttention {
         //   q[i] = "what is token i looking for?"
         //   k[i] = "what does token i offer?"
         //   v[i] = "what does token i actually carry?"
-        let q = matmul(&x.to_vec(), &self.w_q);
-        let k = matmul(&x.to_vec(), &self.w_k);
-        let v = matmul(&x.to_vec(), &self.w_v);
+        let q = matmul(&x.to_vec(), &self.w_q.data);
+        let k = matmul(&x.to_vec(), &self.w_k.data);
+        let v = matmul(&x.to_vec(), &self.w_v.data);
 
         self.cache_q = q.clone();
         self.cache_k = k.clone();
@@ -279,11 +272,11 @@ impl SelfAttention {
 
         for i in 0..self.d_model {
             for j in 0..self.d_k {
-                self.d_w_q[i][j] += batch_d_wq[i][j];
-                self.d_w_k[i][j] += batch_d_wk[i][j];
+                self.w_q.grad[i][j] += batch_d_wq[i][j];
+                self.w_k.grad[i][j] += batch_d_wk[i][j];
             }
             for j in 0..self.d_v {
-                self.d_w_v[i][j] += batch_q_wv[i][j];
+                self.w_v.grad[i][j] += batch_q_wv[i][j];
             }
         }
 
@@ -300,9 +293,9 @@ impl SelfAttention {
         //   d_x_from_q = d_q @ W_Q^T
         //   d_x_from_k = d_k @ W_K^T
         //   d_x_from_v = d_v @ W_V^T
-        let w_q_t = mat_transpose(&self.w_q);
-        let w_k_t = mat_transpose(&self.w_k);
-        let w_v_t = mat_transpose(&self.w_v);
+        let w_q_t = mat_transpose(&self.w_q.data);
+        let w_k_t = mat_transpose(&self.w_k.data);
+        let w_v_t = mat_transpose(&self.w_v.data);
 
         let d_xq = matmul(&d_q, &w_q_t);
         let d_xk = matmul(&d_k_grad, &w_k_t);
@@ -317,6 +310,9 @@ impl SelfAttention {
         }
 
         d_x
+    }
+    pub fn parameters(&mut self) -> Vec<&mut Param> {
+        vec![&mut self.w_q, &mut self.w_k, &mut self.w_v]
     }
 }
 

@@ -2,24 +2,23 @@
 // https://www.yadavsaurabh.com/building-a-transformer-llm-with-code-evolution-of-positional-encoding/
 use crate::common::util::add;
 use rand::RngExt;
+use crate::common::optimizers::Param;
 
 pub struct TokenEmbedding {
-    weight: Vec<Vec<f32>>, //[vocab_size][d_model]
+    weight: Param, //[vocab_size][d_model]
     // BACKWARD: gradient table mirrors `weight`.
     // Each output-row gradient is scattered back into its token row; repeated
     // token IDs accumulate into the same `d_weight[token_id]` row.
-    pub d_weight: Vec<Vec<f32>>, //[vocab_size][d_model]
 
     pub vocab_size: usize,
     pub d_model: usize, // dimension of token embedding
 }
 
 pub struct PositionalEmbedding {
-    weight: Vec<Vec<f32>>, // [max_seq_len][d_model]
+    weight: Param, // [max_seq_len][d_model]
     // BACKWARD: gradient table mirrors `weight`.
     // Each sequence position accumulates into the matching absolute-position
     // row: position 0 -> d_weight[0], position 1 -> d_weight[1], etc.
-    pub d_weight: Vec<Vec<f32>>, // [max_seq_len][d_model]
 
     pub max_seq_len: usize,
     pub d_model: usize, // dimension of positional embedding
@@ -28,20 +27,17 @@ pub struct PositionalEmbedding {
 impl TokenEmbedding {
     pub fn new(vocab_size: usize, d_model: usize) -> Self {
         let mut rng = rand::rng();
-        let weight = (0..vocab_size)
+        let weight_data = (0..vocab_size)
             .map(|_| (0..d_model).map(|_| rng.random_range(-1.0..1.0)).collect())
             .collect();
         Self {
-            weight,
-            // Start with no accumulated gradients; backward adds into rows.
-            d_weight: vec![vec![0.0; d_model]; vocab_size],
-
+            weight: Param::new(weight_data, vec![vec![0.0; d_model]; vocab_size]),
             vocab_size,
             d_model,
         }
     }
     pub fn forward(&self, ids: usize) -> Vec<f32> {
-        self.weight[ids].clone()
+        self.weight.data[ids].clone()
     }
 
     pub fn backward(&mut self, ids: &[usize], d_out: &[Vec<f32>]) {
@@ -52,7 +48,7 @@ impl TokenEmbedding {
         for i in 0..ids.len() {
             let token_id = ids[i];
             for j in 0..self.d_model {
-                self.d_weight[token_id][j] += d_out[i][j];
+                self.weight.grad[token_id][j] += d_out[i][j];
             }
         }
     }
@@ -62,29 +58,30 @@ impl TokenEmbedding {
 
         for token_id in 0..self.vocab_size {
             for dim in 0..self.d_model {
-                transposed[dim][token_id] = self.weight[token_id][dim];
+                transposed[dim][token_id] = self.weight.data[token_id][dim];
             }
         }
         transposed
+    }
+    pub fn parameters(&mut self) -> Vec<&mut Param> {
+        vec![&mut self.weight]
     }
 }
 
 impl PositionalEmbedding {
     pub fn new(max_seq_len: usize, d_model: usize) -> Self {
         let mut rng = rand::rng();
-        let weight = (0..max_seq_len)
+        let weight_data = (0..max_seq_len)
             .map(|_| (0..d_model).map(|_| rng.random_range(-1.0..1.0)).collect())
             .collect();
         Self {
-            weight,
-            // Start with no accumulated gradients; backward adds into rows.
-            d_weight: vec![vec![0.0; d_model]; max_seq_len],
+            weight: Param::new(weight_data, vec![vec![0.0; d_model]; max_seq_len]),
             max_seq_len,
             d_model,
         }
     }
     pub fn forward(&self, ids: usize) -> Vec<f32> {
-        self.weight[ids].clone()
+        self.weight.data[ids].clone()
     }
 
     pub fn backward(&mut self, seq_len: usize, d_out: &[Vec<f32>]) {
@@ -94,9 +91,12 @@ impl PositionalEmbedding {
         // d_out[0] -> position 0, d_out[1] -> position 1, and so on.
         for i in 0..seq_len {
             for j in 0..self.d_model {
-                self.d_weight[i][j] += d_out[i][j];
+                self.weight.grad[i][j] += d_out[i][j];
             }
         }
+    }
+    pub fn parameters(&mut self) -> Vec<&mut Param> {
+        vec![&mut self.weight]
     }
 }
 

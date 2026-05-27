@@ -29,10 +29,12 @@
 // gamma: per-feature scale  [d_model] — learned, init 1.0
 // beta:  per-feature shift  [d_model] — learned, init 0.0
 // eps:   stability constant            — fixed ~1e-5, never trained
+use crate::common::optimizers::Param;
+
 pub struct LayerNorm {
-    pub gamma: Vec<f32>, // [d_model] — scale, init 1.0
-    pub beta: Vec<f32>,  // [d_model] — shift, init 0.0
-    pub eps: f32,        // ~1e-5, prevents div-by-zero
+    pub gamma: Param, //  // Wrapped 1D parameter: [1][d_model] [d_model] — scale, init 1.0
+    pub beta: Param,  //  // Wrapped 1D parameter: [1][d_model][d_model] — shift, init 0.0
+    pub eps: f32,     // ~1e-5, prevents div-by-zero
 
     cache_x_hat: Vec<Vec<f32>>, // normalized values per row, before gamma/beta
     cache_std: Vec<f32>,        // std_dev per row
@@ -44,8 +46,14 @@ impl LayerNorm {
     // Build LayerNorm for a given model width. γ=1, β=0 → identity at start.
     pub fn new(d_model: usize) -> Self {
         Self {
-            gamma: vec![1.0; d_model],
-            beta: vec![0.0; d_model],
+            gamma: Param::new(
+                vec![vec![1.0; d_model]], // data
+                vec![vec![0.0; d_model]], // grads
+            ),
+            beta: Param::new(
+                vec![vec![0.0; d_model]], // data
+                vec![vec![0.0; d_model]], // grads
+            ),
             eps: 1e-5,
             cache_x_hat: Vec::new(),
             cache_std: Vec::new(),
@@ -80,8 +88,8 @@ impl LayerNorm {
         // All three iterators walk in lock-step: x[i], gamma[i], beta[i].
         let y: Vec<f32> = x_hat
             .iter()
-            .zip(self.gamma.iter())
-            .zip(self.beta.iter())
+            .zip(self.gamma.data[0].iter())
+            .zip(self.beta.data[0].iter())
             .map(|((xh, g), b)| g * xh + b)
             .collect();
 
@@ -130,13 +138,15 @@ impl LayerNorm {
     // Final per-token formula:
     //   d_x = (d_xhat - mean(d_xhat) - x_hat * mean(d_xhat * x_hat)) / std
     pub fn backward(&mut self, d_out: &Vec<Vec<f32>>) -> Vec<Vec<f32>> {
-        let n = self.gamma.len() as f32;
+        let n = self.gamma.data[0].len() as f32;
         let mut d_x: Vec<Vec<f32>> = Vec::with_capacity(d_out.len());
 
         // These gradients belong to this backward call. Reset before summing
         // contributions from every token row in the sequence.
-        self.d_gamma.fill(0.0);
-        self.d_beta.fill(0.0);
+        for j in 0..self.gamma.data[0].len() {
+            self.d_gamma[j] = 0.0;
+            self.d_beta[j] = 0.0;
+        }
 
         for i in 0..d_out.len() {
             let x_hat = &self.cache_x_hat[i];
@@ -153,15 +163,15 @@ impl LayerNorm {
             //   d_gamma += d_out * x_hat
             //   d_beta  += d_out
             //   d_xhat   = d_out * gamma
-            for j in 0..self.gamma.len() {
+            for j in 0..self.gamma.data[0].len() {
                 // dL/d_gamma
                 self.d_gamma[j] += d_out[i][j] * x_hat[j];
                 // dL/d_beta
                 self.d_beta[j] += d_out[i][j];
             }
-            let mut d_xhat = vec![0.0; self.gamma.len()];
-            for j in 0..self.gamma.len() {
-                d_xhat[j] = d_out[i][j] * self.gamma[j];
+            let mut d_xhat = vec![0.0; self.gamma.data[0].len()];
+            for j in 0..self.gamma.data[0].len() {
+                d_xhat[j] = d_out[i][j] * self.gamma.data[0][j];
             }
 
             // ── BACKWARD: REVERSE FORWARD STEP 4 (NORMALIZE) ──────────────
@@ -208,14 +218,17 @@ impl LayerNorm {
             //   d_xhat                         direct gradient through normalize
             //   - mean(d_xhat)                 correction for forward mean
             //   - x_hat * mean(d_xhat*x_hat)   correction for forward variance
-            let mut dx_inside = vec![0.0; self.gamma.len()];
-            for j in 0..self.gamma.len() {
+            let mut dx_inside = vec![0.0; self.gamma.data[0].len()];
+            for j in 0..self.gamma.data[0].len() {
                 dx_inside[j] =
                     inv_std * (d_xhat[j] - (sum_dxhat / n) - (x_hat[j] * sum_dxhat_xhat / n));
             }
             d_x.push(dx_inside);
         }
         d_x
+    }
+    pub fn parameters(&mut self) -> Vec<&mut Param> {
+        vec![&mut self.gamma, &mut self.beta]   
     }
 }
 

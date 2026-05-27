@@ -18,21 +18,17 @@
 // until back-propagation is added.
 // https://sebastianraschka.com/blog/2023/self-attention-from-scratch.html
 // ════════════════════════════════════════════════════════════════════════════
+use crate::common::optimizers::Param;
 use crate::common::util::{mat_transpose, matmul};
-
 // w_1: expansion weights  [d_model][d_ff]  — widens each token vector
 // w_2: shrink weights     [d_ff][d_model]  — restores original width
 // d_model: input/output width (same — FFN is shape-preserving)
 // d_ff:    hidden width (typically 4 × d_model)
 pub struct FeedForward {
-    pub w_1: Vec<Vec<f32>>, // [d_model][d_ff] expands per token
-    pub w_2: Vec<Vec<f32>>, // [d_ff][d_model] shrinks per token
+    pub w_1: Param, // [d_model][d_ff] expands per token
+    pub w_2: Param, // [d_ff][d_model] shrinks per token
     pub d_model: usize,
     pub d_ff: usize,
-    // ── Trainable gradients ──
-    // Accumulated by backward() so the optimizer can update w_1 and w_2.
-    pub d_w1: Vec<Vec<f32>>, // Accumulated gradients for w_1
-    pub d_w2: Vec<Vec<f32>>, // Accumulated gradients for w_2
     // ── Caches saved during forward() ──
     cache_x: Vec<Vec<f32>>,         // Input: [seq_len][d_model]
     cache_hidden: Vec<Vec<f32>>,    // Pre-ReLU: [seq_len][d_ff]
@@ -45,12 +41,10 @@ impl FeedForward {
     // from training in production).
     pub fn new(w_1: Vec<Vec<f32>>, w_2: Vec<Vec<f32>>, d_model: usize, d_ff: usize) -> Self {
         Self {
-            w_1,
-            w_2,
+            w_1: Param::new(w_1, vec![vec![0.0; d_ff]; d_model]),
+            w_2: Param::new(w_2, vec![vec![0.0; d_model]; d_ff]),
             d_model,
             d_ff,
-            d_w1: vec![vec![0.0; d_ff]; d_model],
-            d_w2: vec![vec![0.0; d_model]; d_ff],
             cache_x: Vec::new(),
             cache_hidden: Vec::new(),
             cache_activated: Vec::new(),
@@ -66,7 +60,7 @@ impl FeedForward {
         // Each token row: [d_model] @ w_1[d_model][d_ff] → [d_ff]
         // Applied to every row at once via matmul → [seq_len][d_ff]
         // No mixing between tokens — every row is independent.
-        let hidden = matmul(&x.to_vec(), &self.w_1);
+        let hidden = matmul(&x.to_vec(), &self.w_1.data);
         self.cache_hidden = hidden.clone();
         // ── STEP 2: RELU ────────────────────────────────────────────────────
         // ReLU(x) = max(0, x) — element-wise, no weights involved.
@@ -81,7 +75,7 @@ impl FeedForward {
         // ── STEP 3: SHRINK ──────────────────────────────────────────────────
         // Each activated row: [d_ff] @ w_2[d_ff][d_model] → [d_model]
         // Applied to every row via matmul → back to [seq_len][d_model]
-        matmul(&activated, &self.w_2)
+        matmul(&activated, &self.w_2.data)
     }
 
     // Backward pass: d_out = [seq_len][d_model] -> d_x = [seq_len][d_model]
@@ -111,11 +105,11 @@ impl FeedForward {
         //   d_w2        [d_ff][d_model]
         let activated_t = mat_transpose(&self.cache_activated);
         let batch_d_w2 = matmul(&activated_t, &d_out.to_vec());
-        let w_2_t = mat_transpose(&self.w_2);
+        let w_2_t = mat_transpose(&self.w_2.data);
         let d_activated = matmul(&d_out.to_vec(), &w_2_t);
         for i in 0..self.d_ff {
             for j in 0..self.d_model {
-                self.d_w2[i][j] += batch_d_w2[i][j];
+                self.w_2.grad[i][j] += batch_d_w2[i][j];
             }
         }
 
@@ -151,16 +145,19 @@ impl FeedForward {
         //
         // d_x is returned to the previous layer; d_w1 accumulates for the
         // optimizer step.
-        let w_1_t = mat_transpose(&self.w_1);
+        let w_1_t = mat_transpose(&self.w_1.data);
         let d_x = matmul(&d_hidden, &w_1_t);
         let x_t = mat_transpose(&self.cache_x);
         let batch_d_w1 = matmul(&x_t, &d_hidden);
         for i in 0..self.d_model {
             for j in 0..self.d_ff {
-                self.d_w1[i][j] += batch_d_w1[i][j];
+                self.w_1.grad[i][j] += batch_d_w1[i][j];
             }
         }
         d_x
+    }
+    pub fn parameters(&mut self) -> Vec<&mut Param> {
+        vec![&mut self.w_1, &mut self.w_2]
     }
 }
 
