@@ -24,6 +24,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 
 use crate::common::optimizers::Param;
+use crate::common::serilization::SaveableModel;
 use crate::common::util::mat_transpose;
 use crate::common::util::matmul;
 use crate::layers::embedding::{embed_sequence, PositionalEmbedding, TokenEmbedding};
@@ -193,8 +194,10 @@ impl GPT {
         }
         tokens
     }
+}
 
-    pub fn parameters(&mut self) -> Vec<&mut Param> {
+impl SaveableModel for GPT {
+    fn parameters(&mut self) -> Vec<&mut Param> {
         let mut params = Vec::new();
         params.extend(self.token_emb.parameters());
         params.extend(self.position_emb.parameters());

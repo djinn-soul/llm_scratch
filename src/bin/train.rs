@@ -7,6 +7,7 @@ use llm_scratch_rs::{
         dataloader::DataLoader,
         loss::{cross_entropy_backward, cross_entropy_loss},
         optimizers::{Optimizer, SGD},
+        serilization::SaveableModel,
     },
     models::gpt::GPT,
     tokenizers::bpe::{download_file_if_not_present, BytePair},
@@ -127,24 +128,34 @@ fn main() {
             io::stdout().flush().unwrap();
         }
     }
-    // 8. Test Autoregressive Generation after training!
-    println!("\n[4/5] Testing generation with the trained model...");
+    // 8. Save Model Weights (Auto-detecting JSON and Binary based on file extension!)
+    println!("\n[4/5] Saving model weights to disk...");
+    gpt.save_weights("model_weights.json").expect("Failed to save JSON weights");
+    gpt.save_weights("model_weights.bin").expect("Failed to save binary weights");
+    println!("  ✅ Weights successfully saved to 'model_weights.json' and 'model_weights.bin'!");
+
+    // 9. Load weights back and run Autoregressive Generation!
+    println!("\n[5/5] Testing generation with the reloaded model...");
+    
     // Prompt the model with a starting sequence
     let prompt_text = "if she had not dragged him down ";
     let prompt_tokens = tokenizer.encode(prompt_text.to_string(), None).unwrap();
     println!("  Prompt: \"{}\" -> {:?}", prompt_text, prompt_tokens);
+
+    // Let's reload the weights from the binary file to verify loading works perfectly!
+    println!("  Loading weights back from 'model_weights.bin' before generation...");
+    gpt.load_weights("model_weights.bin").expect("Failed to load binary weights");
+
     // Generate 12 new tokens to complete the sequence autoregressively
     let generated_ids = gpt.generate(&prompt_tokens, 12);
     println!("  Generated Token IDs: {:?}", generated_ids);
+
     let decoded_result = tokenizer.decode(generated_ids).unwrap();
-    println!(
-        "\n[5/5] Final decoded sequence:\n  \"{}\"",
-        decoded_result.trim()
-    );
+    println!("\nFinal decoded sequence:\n  \"{}\"", decoded_result.trim());
     
     let elapsed = start_time.elapsed();
     println!(
-        "\n🎉 Training complete in {:.2?}! The model successfully memorized and reproduced the sequence.",
+        "\n🎉 Training and saving complete in {:.2?}! The model successfully memorized and reproduced the sequence.",
         elapsed
     );
 }
