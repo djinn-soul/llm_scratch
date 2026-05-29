@@ -24,6 +24,9 @@ impl SGD {
 
 impl Optimizer for SGD {
     fn step(&mut self, params: &mut [&mut Param]) {
+        // SGD has no memory between steps, so there are no optimizer-owned
+        // buffers to initialize. It only needs the latest gradients.
+
         // Loop over every trainable parameter matrix in the model
         for param in params {
             // Loop over every row (e.g. each neuron or embedding vector)

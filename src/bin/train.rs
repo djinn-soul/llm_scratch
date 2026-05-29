@@ -6,7 +6,7 @@ use llm_scratch_rs::{
     common::{
         dataloader::DataLoader,
         loss::{cross_entropy_backward, cross_entropy_loss},
-        optimizers::{Optimizer, SGD},
+        optimizers::{Optimizer, RMSProp, SGDM},
         serilization::SaveableModel,
     },
     models::gpt::GPT,
@@ -27,8 +27,10 @@ fn main() {
 
     // 3. Define target training corpus to memorize (sliding window from the book!)
     let start_phrase = "It was not till three years later";
-    let start_pos = text.find(start_phrase).expect("Target phrase not found in book");
-    
+    let start_pos = text
+        .find(start_phrase)
+        .expect("Target phrase not found in book");
+
     // Slice 1,500 characters containing the sentence: "if she had not dragged him down..."
     let test = &text[start_pos..start_pos + 1500];
     println!("\n[1/5] Target text to learn:\n  \"{}\"", test);
@@ -40,7 +42,6 @@ fn main() {
         all_tokens.len(),
         all_tokens
     );
-
 
     // 4. Initialize modular DataLoader (max_length = 8, stride = 1)
     let max_seq_len = 8; // Context window size
@@ -57,7 +58,7 @@ fn main() {
     let num_heads = 2;
     let d_ff = 32;
     let num_blocks = 2;
-    let learning_rate = 0.01;
+    let learning_rate = 0.001;
 
     let mut gpt = GPT::new(
         vocab_size,
@@ -67,10 +68,10 @@ fn main() {
         d_ff,
         num_blocks,
     );
-    // 5. Initialize the modular SGD optimizer
-    let mut optimizer = SGD::new(learning_rate);
+    // 5. Initialize the modular RMSProp optimizer
+    let mut optimizer = RMSProp::new(learning_rate);
     println!(
-        "Initialized mini-GPT and modular SGD optimizer (lr = {}).\n",
+        "Initialized mini-GPT and modular RMSProp optimizer (lr = {}).\n",
         learning_rate
     );
     // Let's print initial loss before training using the first batch
@@ -107,7 +108,12 @@ fn main() {
             steps += 1;
 
             // Render interactive spinner
-            print!("\r  Training Epoch {:2}/{}... {} ", epoch, epochs, spinner[steps % spinner.len()]);
+            print!(
+                "\r  Training Epoch {:2}/{}... {} ",
+                epoch,
+                epochs,
+                spinner[steps % spinner.len()]
+            );
             io::stdout().flush().unwrap();
 
             // D. Backward Pass: compute and route gradients back through the entire network
@@ -130,13 +136,15 @@ fn main() {
     }
     // 8. Save Model Weights (Auto-detecting JSON and Binary based on file extension!)
     println!("\n[4/5] Saving model weights to disk...");
-    gpt.save_weights("model_weights.json").expect("Failed to save JSON weights");
-    gpt.save_weights("model_weights.bin").expect("Failed to save binary weights");
+    gpt.save_weights("model_weights.json")
+        .expect("Failed to save JSON weights");
+    gpt.save_weights("model_weights.bin")
+        .expect("Failed to save binary weights");
     println!("  ✅ Weights successfully saved to 'model_weights.json' and 'model_weights.bin'!");
 
     // 9. Load weights back and run Autoregressive Generation!
     println!("\n[5/5] Testing generation with the reloaded model...");
-    
+
     // Prompt the model with a starting sequence
     let prompt_text = "if she had not dragged him down ";
     let prompt_tokens = tokenizer.encode(prompt_text.to_string(), None).unwrap();
@@ -144,7 +152,8 @@ fn main() {
 
     // Let's reload the weights from the binary file to verify loading works perfectly!
     println!("  Loading weights back from 'model_weights.bin' before generation...");
-    gpt.load_weights("model_weights.bin").expect("Failed to load binary weights");
+    gpt.load_weights("model_weights.bin")
+        .expect("Failed to load binary weights");
 
     // Generate 12 new tokens to complete the sequence autoregressively
     let generated_ids = gpt.generate(&prompt_tokens, 12);
@@ -152,7 +161,7 @@ fn main() {
 
     let decoded_result = tokenizer.decode(generated_ids).unwrap();
     println!("\nFinal decoded sequence:\n  \"{}\"", decoded_result.trim());
-    
+
     let elapsed = start_time.elapsed();
     println!(
         "\n🎉 Training and saving complete in {:.2?}! The model successfully memorized and reproduced the sequence.",
