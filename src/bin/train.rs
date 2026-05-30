@@ -6,7 +6,7 @@ use llm_scratch_rs::{
     common::{
         dataloader::DataLoader,
         loss::{cross_entropy_backward, cross_entropy_loss},
-        optimizers::{Optimizer, RMSProp},
+        optimizers::{Optimizer, Adam},
         serilization::SaveableModel,
     },
     models::gpt::GPT,
@@ -58,7 +58,7 @@ fn main() {
     let num_heads = 2;
     let d_ff = 32;
     let num_blocks = 2;
-    let learning_rate = 0.001;
+    let learning_rate = 0.0001;
 
     let mut gpt = GPT::new(
         vocab_size,
@@ -69,9 +69,9 @@ fn main() {
         num_blocks,
     );
     // 5. Initialize the modular RMSProp optimizer
-    let mut optimizer = RMSProp::new(learning_rate);
+    let mut optimizer = Adam::new(learning_rate);
     println!(
-        "Initialized mini-GPT and modular RMSProp optimizer (lr = {}).\n",
+        "Initialized mini-GPT and modular Adam optimizer (lr = {}).\n",
         learning_rate
     );
     // Let's print initial loss before training using the first batch
