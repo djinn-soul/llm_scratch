@@ -71,14 +71,20 @@
 //
 // 1. struct Adam with:
 //    - lr, beta1, beta2, epsilon
+//    - clipping: ClippingStrategy
 //    - step_count (t)
 //    - m: Vec<Vec<Vec<f32>>>  (momentum buffers)
 //    - v: Vec<Vec<Vec<f32>>>  (variance buffers)
 //
-// 2. new() constructor — lazy initialization
-//    (buffers created on first step)
+// 2. new() constructor
+//    - receives learning rate and clipping policy up front
+//    - leaves m/v buffers empty until the first update sees model shape
 //
-// 3. step() method with:
+// 3. Optimizer::step() wrapper
+//    - applies the configured clipping policy to gradients
+//    - calls Adam::update() for the Adam-specific math
+//
+// 4. update() method with:
 //    - t = step_count + 1
 //    - Bias correction: (1 - beta^t)
 //    - m update: β₁·m + (1-β₁)·g
@@ -103,7 +109,7 @@
 
 use crate::common::param::Param;
 
-use super::Optimizer;
+use super::{ClippingStrategy, Optimizer};
 
 /// Adam optimizer.
 ///
@@ -129,7 +135,10 @@ pub struct Adam {
     /// Small stabilizer used in `sqrt(v_hat) + epsilon`.
     pub epsilon: f32,
 
-    /// Training step number `t`, starting at 1 inside `step()`.
+    /// Gradient clipping policy applied by `Optimizer::step()` before Adam math.
+    pub clipping: ClippingStrategy,
+
+    /// Training step number `t`, starting at 1 inside `update()`.
     ///
     /// Adam needs `t` for bias correction because `m` and `v` start at zero.
     step_count: u64,
@@ -152,13 +161,18 @@ pub struct Adam {
 }
 
 impl Adam {
-    pub fn new(lr: f32) -> Self {
+    /// Create Adam with explicit gradient clipping policy.
+    ///
+    /// Pass `ClippingStrategy::None` for raw Adam, or a clipping strategy when
+    /// training can produce unstable gradient spikes.
+    pub fn new(lr: f32, clipping: ClippingStrategy) -> Self {
         Self {
             lr,
             beta1: 0.9,
             beta2: 0.999,
             epsilon: 1e-8,
             step_count: 0,
+            clipping,
             m: Vec::new(),
             v: Vec::new(),
         }
@@ -166,7 +180,13 @@ impl Adam {
 }
 
 impl Optimizer for Adam {
-    fn step(&mut self, params: &mut [&mut Param]) {
+    fn clipping(&self) -> &ClippingStrategy {
+        &self.clipping
+    }
+
+    fn update(&mut self, params: &mut [&mut Param]) {
+        // Called by `Optimizer::step()` after gradient clipping has already
+        // been applied. This method only contains Adam's parameter-update math.
         self.step_count += 1;
         let t = self.step_count as f32;
 

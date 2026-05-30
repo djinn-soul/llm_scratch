@@ -69,14 +69,20 @@
 //
 // 1. struct AdamW with:
 //    - lr, beta1, beta2, epsilon, weight_decay
+//    - clipping: ClippingStrategy
 //    - step_count (t)
 //    - m: Vec<Vec<Vec<f32>>>  (momentum buffers)
 //    - v: Vec<Vec<Vec<f32>>>  (variance buffers)
 //
-// 2. new() constructor — lazy initialization
-//    (buffers created on first step)
+// 2. new() constructor
+//    - receives learning rate, weight decay, and clipping policy up front
+//    - leaves m/v buffers empty until the first update sees model shape
 //
-// 3. step() method with:
+// 3. Optimizer::step() wrapper
+//    - applies the configured clipping policy to gradients
+//    - calls AdamW::update() for the AdamW-specific math
+//
+// 4. update() method with:
 //    - t = step_count + 1
 //    - Bias correction: (1 - beta^t)
 //    - m update: β₁·m + (1-β₁)·g
@@ -103,7 +109,7 @@
 
 use crate::common::param::Param;
 
-use super::Optimizer;
+use super::{ClippingStrategy, Optimizer};
 
 /// AdamW optimizer.
 ///
@@ -130,7 +136,10 @@ pub struct AdamW {
     /// Small stabilizer used in `sqrt(v_hat) + epsilon`.
     pub epsilon: f32,
 
-    /// Training step number `t`, starting at 1 inside `step()`.
+    /// Gradient clipping policy applied by `Optimizer::step()` before AdamW math.
+    pub clipping: ClippingStrategy,
+
+    /// Training step number `t`, starting at 1 inside `update()`.
     ///
     /// AdamW needs `t` for bias correction because `m` and `v` start at zero.
     step_count: u64,
@@ -159,7 +168,11 @@ pub struct AdamW {
 }
 
 impl AdamW {
-    pub fn new(lr: f32, weight_decay: f32) -> Self {
+    /// Create AdamW with explicit gradient clipping policy.
+    ///
+    /// Pass `ClippingStrategy::None` for raw AdamW, or a clipping strategy when
+    /// training can produce unstable gradient spikes.
+    pub fn new(lr: f32, weight_decay: f32, clipping: ClippingStrategy) -> Self {
         Self {
             lr,
             beta1: 0.9,
@@ -167,7 +180,7 @@ impl AdamW {
             epsilon: 1e-8,
             step_count: 0,
             weight_decay, // caller sets this — typical: 0.01
-
+            clipping,
             m: Vec::new(),
             v: Vec::new(),
         }
@@ -175,7 +188,13 @@ impl AdamW {
 }
 
 impl Optimizer for AdamW {
-    fn step(&mut self, params: &mut [&mut Param]) {
+    fn clipping(&self) -> &ClippingStrategy {
+        &self.clipping
+    }
+
+    fn update(&mut self, params: &mut [&mut Param]) {
+        // Called by `Optimizer::step()` after gradient clipping has already
+        // been applied. This method only contains AdamW's update math.
         self.step_count += 1;
         let t = self.step_count as f32;
 

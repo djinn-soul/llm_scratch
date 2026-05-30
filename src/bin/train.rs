@@ -6,12 +6,35 @@ use llm_scratch_rs::{
     common::{
         dataloader::DataLoader,
         loss::{cross_entropy_backward, cross_entropy_loss},
-        optimizers::{AdamW, Optimizer},
+        optimizers::{AdamW, ClippingStrategy, Optimizer},
         serilization::SaveableModel,
     },
     models::gpt::GPT,
     tokenizers::bpe::{download_file_if_not_present, BytePair},
 };
+
+/// Computes the average cross-entropy loss over a given number of batches from a DataLoader.
+pub fn calc_loss_loader(gpt: &mut GPT, data_loader: &DataLoader, num_batches: usize) -> f32 {
+    let mut total_loss = 0.0;
+    let mut count = 0;
+
+    for (input_slice, target_slice) in data_loader.iter() {
+        let logits = gpt.forward(&input_slice);
+        let loss = cross_entropy_loss(&logits, &target_slice);
+        total_loss += loss;
+        count += 1;
+
+        if count >= num_batches {
+            break;
+        }
+    }
+
+    if count == 0 {
+        0.0
+    } else {
+        total_loss / count as f32
+    }
+}
 
 fn main() {
     let url = "https://raw.githubusercontent.com/rasbt/LLMs-from-scratch/main/ch02/01_main-chapter-code/the-verdict.txt";
@@ -42,14 +65,24 @@ fn main() {
         all_tokens.len(),
         all_tokens
     );
+    // 90% training / 10% validation split sequentially
+    let split_idx = (all_tokens.len() as f32 * 0.9) as usize;
+    let train_tokens = all_tokens[..split_idx].to_vec();
+    let val_tokens = all_tokens[split_idx..].to_vec();
+    println!(
+        "Split corpus into {} training tokens and {} validation tokens.",
+        train_tokens.len(),
+        val_tokens.len()
+    );
 
     // 4. Initialize modular DataLoader (max_length = 8, stride = 1)
     let max_seq_len = 8; // Context window size
     let stride = 1; // Step 1 token at a time
-    let data_loader = DataLoader::new(all_tokens, max_seq_len, stride);
+    let train_loader = DataLoader::new(train_tokens, max_seq_len, stride);
+    let val_loader = DataLoader::new(val_tokens, max_seq_len, stride);
     println!(
         "DataLoader initialized! Total samples: {}",
-        data_loader.len()
+        train_loader.len()
     );
 
     // 5. Initialize a miniature GPT model
@@ -75,30 +108,35 @@ fn main() {
     // Initialize AdamW — Adam with decoupled weight decay
     // Weight decay shrinks weights each step: w *= (1 - lr * wd)
     // This prevents overfitting without corrupting Adam's moment buffers.
-    let mut optimizer = AdamW::new(learning_rate, weight_decay);
+    let mut optimizer = AdamW::new(
+        learning_rate,
+        weight_decay,
+        ClippingStrategy::Norm(1.0),
+    );
+
     println!(
         "Initialized mini-GPT and AdamW optimizer (lr = {:.0e}, wd = {}).\n",
         learning_rate, weight_decay
     );
     // Let's print initial loss before training using the first batch
-    let (init_input, init_target) = data_loader.get_item(0);
-    let initial_logits = gpt.forward(&init_input);
-    let initial_loss = cross_entropy_loss(&initial_logits, &init_target);
+    // Replace lines 119-126 in train.rs:
+    let initial_train_loss = calc_loss_loader(&mut gpt, &train_loader, 10);
+    let initial_val_loss = calc_loss_loader(&mut gpt, &val_loader, 10);
     println!(
-        "[2/5] Initial cross-entropy loss (first window): {:.6}",
-        initial_loss
+        "[2/5] Initial cross-entropy loss -> Train: {:.6}, Val: {:.6}",
+        initial_train_loss, initial_val_loss
     );
+
     // 7. Training Loop using our manual backpropagation and DataLoader
     let start_time = Instant::now();
     println!("\n[3/5] Starting manual backpropagation training loop...");
     let epochs = 80;
     for epoch in 1..=epochs {
-        let mut epoch_loss = 0.0;
         let mut steps = 0;
         let spinner = ["|", "/", "-", "\\"];
 
         // Iterate over the dataset using the generic DataLoader iterator
-        for (input_slice, target_slice) in data_loader.iter() {
+        for (input_slice, target_slice) in train_loader.iter() {
             // A. Zero out gradients from previous step
             {
                 let mut params = gpt.parameters();
@@ -108,9 +146,6 @@ fn main() {
             }
             // B. Forward Pass: compute raw logits
             let logits = gpt.forward(&input_slice);
-            // C. Compute Cross-Entropy Loss
-            let loss = cross_entropy_loss(&logits, &target_slice);
-            epoch_loss += loss;
             steps += 1;
 
             // Render interactive spinner
@@ -131,11 +166,15 @@ fn main() {
                 optimizer.step(&mut params);
             }
         }
-        let avg_loss = epoch_loss / steps as f32;
         // Clear the spinner line cleanly
         print!("\r                                         \r");
         if epoch == 1 || epoch % 10 == 0 || epoch == epochs {
-            println!("  Epoch {:2}/{}: Avg Loss = {:.6}", epoch, epochs, avg_loss);
+            let train_loss = calc_loss_loader(&mut gpt, &train_loader, 10);
+            let val_loss = calc_loss_loader(&mut gpt, &val_loader, 10);
+            println!(
+                "  Epoch {:2}/{}: Train Loss = {:.6} | Val Loss = {:.6}",
+                epoch, epochs, train_loss, val_loss
+            );
         } else {
             io::stdout().flush().unwrap();
         }

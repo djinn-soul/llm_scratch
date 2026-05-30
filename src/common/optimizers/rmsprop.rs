@@ -1,6 +1,6 @@
 use crate::common::param::Param;
 
-use super::Optimizer;
+use super::{ClippingStrategy, Optimizer};
 
 /// RMSProp keeps a running average of squared gradients for each weight.
 ///
@@ -19,6 +19,10 @@ use super::Optimizer;
 /// Difference from SGDM:
 ///   RMSProp remembers gradient size, not direction. It scales the current
 ///   gradient but does not build a velocity direction.
+///
+/// Clipping:
+///   The shared `Optimizer::step()` wrapper applies this optimizer's
+///   `ClippingStrategy` before calling `RMSProp::update()`.
 pub struct RMSProp {
     /// Base learning rate before the RMS scaling is applied.
     pub lr: f32,
@@ -31,6 +35,9 @@ pub struct RMSProp {
     /// Small stabilizer so division never uses zero as the denominator.
     pub epsilon: f32,
 
+    /// Gradient clipping policy applied before the RMSProp update.
+    pub clipping: ClippingStrategy,
+
     /// Per-parameter running mean of squared gradients.
     ///
     /// Shape: [param_index][row][col], matching every matrix in `params`.
@@ -42,18 +49,29 @@ pub struct RMSProp {
 }
 
 impl RMSProp {
-    pub fn new(lr: f32) -> Self {
+    /// Create RMSProp with explicit gradient clipping policy.
+    ///
+    /// Pass `ClippingStrategy::None` for raw RMSProp, or a clipping strategy
+    /// when training can produce unstable gradient spikes.
+    pub fn new(lr: f32, clipping: ClippingStrategy) -> Self {
         Self {
             lr,
             decay_rate: 0.9, // sensible default
             epsilon: 1e-8,   // sensible default
+            clipping,
             sq_avg: Vec::new(),
         }
     }
 }
 
 impl Optimizer for RMSProp {
-    fn step(&mut self, params: &mut [&mut Param]) {
+    fn clipping(&self) -> &ClippingStrategy {
+        &self.clipping
+    }
+
+    fn update(&mut self, params: &mut [&mut Param]) {
+        // Called by `Optimizer::step()` after gradient clipping has already
+        // been applied. This method only contains RMSProp's update math.
         if self.sq_avg.is_empty() {
             // Lazy initialization:
             // At construction time we do not know how many parameter matrices

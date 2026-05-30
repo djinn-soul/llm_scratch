@@ -1,6 +1,6 @@
 use crate::common::param::Param;
 
-use super::Optimizer;
+use super::{ClippingStrategy, Optimizer};
 
 /// Stochastic Gradient Descent (SGD) — the simplest optimizer.
 ///
@@ -22,21 +22,37 @@ use super::Optimizer;
 /// Memory:
 ///   SGD has no history buffer. Every update depends only on the current
 ///   `param.grad` values from the latest backward pass.
+///
+/// Clipping:
+///   The shared `Optimizer::step()` wrapper applies this optimizer's
+///   `ClippingStrategy` before calling `SGD::update()`.
 pub struct SGD {
     /// Learning rate — how big each weight update step is.
     ///
     /// Typical range: 0.001-0.1, depending on model and batch size.
     pub lr: f32,
+    /// Gradient clipping policy applied before the SGD update.
+    pub clipping: ClippingStrategy,
 }
 
 impl SGD {
-    pub fn new(lr: f32) -> Self {
-        Self { lr }
+    /// Create SGD with explicit gradient clipping policy.
+    ///
+    /// Pass `ClippingStrategy::None` for raw SGD, or a clipping strategy when
+    /// training can produce unstable gradient spikes.
+    pub fn new(lr: f32, clipping: ClippingStrategy) -> Self {
+        Self { lr, clipping }
     }
 }
 
 impl Optimizer for SGD {
-    fn step(&mut self, params: &mut [&mut Param]) {
+    fn clipping(&self) -> &ClippingStrategy {
+        &self.clipping
+    }
+
+    fn update(&mut self, params: &mut [&mut Param]) {
+        // Called by `Optimizer::step()` after gradient clipping has already
+        // been applied. This method only contains SGD's update rule.
         // SGD has no memory between steps, so there are no optimizer-owned
         // buffers to initialize. It only needs the latest gradients.
 
