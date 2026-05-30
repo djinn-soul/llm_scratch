@@ -6,7 +6,7 @@ use llm_scratch_rs::{
     common::{
         dataloader::DataLoader,
         loss::{cross_entropy_backward, cross_entropy_loss},
-        optimizers::{Optimizer, Adam,SGD},
+        optimizers::{AdamW, Optimizer},
         serilization::SaveableModel,
     },
     models::gpt::GPT,
@@ -58,7 +58,11 @@ fn main() {
     let num_heads = 2;
     let d_ff = 32;
     let num_blocks = 2;
-    let learning_rate = 0.001;
+    // AdamW hyperparameters:
+    //   lr=3e-4  — the "Karpathy constant", safe default for LLM training with Adam
+    //   wd=0.01  — standard weight decay used in GPT-2, BERT, and LLaMA training
+    let learning_rate = 3e-4;
+    let weight_decay = 0.01;
 
     let mut gpt = GPT::new(
         vocab_size,
@@ -68,11 +72,13 @@ fn main() {
         d_ff,
         num_blocks,
     );
-    // 5. Initialize the modular RMSProp optimizer
-    let mut optimizer = Adam::new(learning_rate);
+    // Initialize AdamW — Adam with decoupled weight decay
+    // Weight decay shrinks weights each step: w *= (1 - lr * wd)
+    // This prevents overfitting without corrupting Adam's moment buffers.
+    let mut optimizer = AdamW::new(learning_rate, weight_decay);
     println!(
-        "Initialized mini-GPT and modular Adam optimizer (lr = {}).\n",
-        learning_rate
+        "Initialized mini-GPT and AdamW optimizer (lr = {:.0e}, wd = {}).\n",
+        learning_rate, weight_decay
     );
     // Let's print initial loss before training using the first batch
     let (init_input, init_target) = data_loader.get_item(0);

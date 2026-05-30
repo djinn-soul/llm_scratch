@@ -12,7 +12,9 @@
 // - SGDM stores direction memory (`velocity`).
 // - RMSProp stores gradient-size memory (`sq_avg`).
 // - Adam stores both direction memory (`m`) and gradient-size memory (`v`).
+// - AdamW is Adam plus decoupled weight decay.
 pub mod adam;
+pub mod adam_w;
 pub mod optimizer;
 pub mod rmsprop;
 pub mod sgd;
@@ -20,6 +22,7 @@ pub mod sgd_m;
 
 pub use crate::common::param::Param;
 pub use adam::Adam;
+pub use adam_w::AdamW;
 pub use optimizer::Optimizer;
 pub use rmsprop::RMSProp;
 pub use sgd::SGD;

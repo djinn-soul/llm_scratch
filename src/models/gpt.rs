@@ -35,17 +35,16 @@ use crate::models::transformer::Transformer;
 // position_emb: position id -> dense vector lookup
 // blocks:       stacked causal transformer decoder blocks
 // norm:         final layer normalization before vocabulary projection
-// lm_head:      hidden vector -> vocabulary logits projection
+// lm_head:      derived projection token_emb.weight^T, not a separate Param
 //
-// Weight tying: lm_head reuses token_emb as a transposed matrix.
+// Weight tying:
+//   The language-model head is always computed from token_emb.weight^T.
+//   Gradients from the output projection are transposed back into token_emb.
 pub struct GPT {
     pub token_emb: TokenEmbedding,
     pub position_emb: PositionalEmbedding,
     pub blocks: Vec<Transformer>,
     pub norm: LayerNorm,
-    pub lm_head: Param,
-    // TODO(backward): decide whether lm_head stays tied to token_emb weights
-    // during updates, then route lm_head gradients into token embedding grads.
 
     // ── Activations saved during forward(), used by backward() ──
     // BACKWARD: these caches preserve the forward pass context so gradients
@@ -82,15 +81,11 @@ impl GPT {
         // 4. Final layer normalization: stabilizes the last residual stream.
         let norm = LayerNorm::new(d_model);
 
-        // 5. Language-model head: ties output projection to token embeddings. (weight tying)
-        let lm_head_data = token_emb.transposed_weight();
-
         Self {
             token_emb,
             position_emb,
             blocks,
             norm,
-            lm_head: Param::new(lm_head_data),
             cache_blocks: Vec::new(),
             cache_embed: Vec::new(),
             cache_norm: Vec::new(),
@@ -121,24 +116,32 @@ impl GPT {
         // ── STEP 3: FINAL NORMALIZATION ─────────────────────────────────────
         // GPT-style models normalize before the final vocabulary projection.
         let x = self.norm.forward(&x);
-        // BACKWARD: final hidden states are needed for lm_head_grad.
+        // BACKWARD: final hidden states are needed for tied lm_head gradient.
         self.cache_norm = x.clone();
 
         // ── STEP 4: PROJECT TO VOCABULARY LOGITS ────────────────────────────
         // One row of logits per input token position.
-        matmul(&x, &self.lm_head.data)
+        // Weight tying: do not store a separate `lm_head`; derive it from the
+        // token embedding table every time so the two cannot drift apart.
+        let lm_head = self.token_emb.transposed_weight();
+        matmul(&x, &lm_head)
     }
 
     pub fn backward(&mut self, d_logits: &Vec<Vec<f32>>) {
         // ── STEP 1: LANGUAGE-MODEL HEAD BACKWARD ──────────────────────────
-        // Forward:   logits    = cache_norm @ lm_head
-        // Backward:  d_norm    = d_logits  @ lm_head^T   (flows left)
-        //            d_lm_head = cache_norm^T @ d_logits  (weight gradient)
+        // Forward:   logits    = cache_norm @ token_emb.weight^T
+        // Backward:  d_norm    = d_logits  @ token_emb.weight
+        //            d_lm_head = cache_norm^T @ d_logits
+        //
+        // Because `lm_head` is tied, its gradient is not stored in a separate
+        // Param. It is transposed back into token_emb.weight.grad.
         let norm_t = mat_transpose(&self.cache_norm);
-        self.lm_head.grad = matmul(&norm_t, d_logits);
+        let d_lm_head = matmul(&norm_t, d_logits);
+        self.token_emb.add_transposed_grad(&d_lm_head);
 
         // d_hidden_final_from_logits has shape [seq_len][d_model]
-        let lm_head_t = mat_transpose(&self.lm_head.data);
+        let lm_head = self.token_emb.transposed_weight();
+        let lm_head_t = mat_transpose(&lm_head);
         let d_norm = matmul(d_logits, &lm_head_t);
 
         // ── STEP 2: LayerNorm backward ──────────────────────────────────────
@@ -205,7 +208,6 @@ impl SaveableModel for GPT {
             params.extend(block.parameters());
         }
         params.extend(self.norm.parameters());
-        params.push(&mut self.lm_head);
         params
     }
 }
@@ -279,11 +281,12 @@ impl SaveableModel for GPT {
 // The language-model head projects each hidden vector to vocabulary scores.
 // These scores are called logits.
 //
-//   logits = hidden @ lm_head
+//   lm_head = token_emb.weight^T
+//   logits  = hidden @ lm_head
 //
 // Shape:
 //   hidden  [seq_len][d_model]
-//   lm_head [d_model][vocab_size]
+//   lm_head [d_model][vocab_size]  derived from token_emb
 //   logits  [seq_len][vocab_size]
 //
 // If vocab_size = 6, logits might look like:
@@ -335,7 +338,7 @@ impl SaveableModel for GPT {
 //   position_emb  PositionalEmbedding  position id -> vector
 //   blocks        Vec<Transformer>     stacked causal decoder blocks
 //   norm          LayerNorm            final normalization
-//   lm_head       Vec<Vec<f32>>        hidden vector -> vocab logits
+//   lm_head       token_emb^T          derived projection, not stored separately
 //
 //   tokens        Vec<usize>           [seq_len]
 //   x             Vec<Vec<f32>>        [seq_len][d_model]

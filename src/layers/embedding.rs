@@ -51,6 +51,37 @@ impl TokenEmbedding {
         }
     }
 
+    pub fn add_transposed_grad(&mut self, d_tied_head: &[Vec<f32>]) {
+        // ── BACKWARD: TIED LM HEAD GRADIENT ────────────────────────────────
+        // GPT ties the output projection to the token embedding table:
+        //
+        //   lm_head = token_emb.weight^T
+        //
+        // The LM-head gradient has transposed shape:
+        //   d_tied_head          [d_model][vocab_size]
+        //   token_emb.weight.grad [vocab_size][d_model]
+        //
+        // So gradient [dim][token_id] must be added back into
+        // token_emb.weight.grad[token_id][dim].
+        assert_eq!(
+            d_tied_head.len(),
+            self.d_model,
+            "Tied lm_head gradient row count must match d_model"
+        );
+
+        for dim in 0..self.d_model {
+            assert_eq!(
+                d_tied_head[dim].len(),
+                self.vocab_size,
+                "Tied lm_head gradient column count must match vocab_size"
+            );
+
+            for token_id in 0..self.vocab_size {
+                self.weight.grad[token_id][dim] += d_tied_head[dim][token_id];
+            }
+        }
+    }
+
     pub fn transposed_weight(&self) -> Vec<Vec<f32>> {
         let mut transposed = vec![vec![0.0; self.vocab_size]; self.d_model];
 
