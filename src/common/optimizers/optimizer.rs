@@ -20,19 +20,25 @@
 /// How the gradient matrix gets clipped:
 ///   Each `Param` has a gradient matrix with the same shape as its data matrix:
 ///
-///     grad = [
-///       [g00, g01],
-///       [g10, g11],
-///     ]
+///   ```text
+///   grad = [
+///     [g00, g01],
+///     [g10, g11],
+///   ]
+///   ```
 ///
 ///   Clipping walks through those same row/column positions and rewrites the
 ///   gradient cells in place:
 ///
-///     grad[row][col] = clipped_or_scaled_value
+///   ```text
+///   grad[row][col] = clipped_or_scaled_value
+///   ```
 ///
 ///   After that, the optimizer reads the clipped gradients and updates weights:
 ///
-///     data[row][col] -= optimizer_step_based_on(grad[row][col])
+///   ```text
+///   data[row][col] -= optimizer_step_based_on(grad[row][col])
+///   ```
 ///
 /// Advanced Learning Notes:
 ///   - **GlobalNorm**: Highly recommended for LLM pretraining because it scales the entire
