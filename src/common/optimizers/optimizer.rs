@@ -6,6 +6,12 @@ use crate::common::param::Param;
 /// This lets the training loop work with any optimizer without changing code:
 ///   `optimizer.step(&mut params);`
 ///
+/// Training-loop order:
+///   1. clear old gradients with `zero_grad()`
+///   2. run forward pass
+///   3. run backward pass so each `Param.grad` is filled
+///   4. call `optimizer.step(&mut params)` to update `Param.data`
+///
 /// Design note:
 ///   The model owns weights and gradients through `Param`.
 ///   The optimizer owns update strategy and any extra state, such as momentum

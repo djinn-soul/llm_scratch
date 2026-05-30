@@ -8,10 +8,17 @@ use super::Optimizer;
 ///   sq_avg = decay_rate * sq_avg + (1 - decay_rate) * grad^2
 ///   weight = weight - lr * grad / (sqrt(sq_avg) + epsilon)
 ///
+/// Read `sq_avg` as "how large have this weight's gradients been recently?"
+/// It is squared, so sign does not matter: -10 and +10 both mean "large".
+///
 /// Intuition:
 ///   - weights with consistently large gradients get smaller effective steps.
 ///   - weights with small gradients can still move because their denominator is small.
 ///   - this is adaptive learning rate scaling, not momentum.
+///
+/// Difference from SGDM:
+///   RMSProp remembers gradient size, not direction. It scales the current
+///   gradient but does not build a velocity direction.
 pub struct RMSProp {
     /// Base learning rate before the RMS scaling is applied.
     pub lr: f32,
@@ -27,6 +34,8 @@ pub struct RMSProp {
     /// Per-parameter running mean of squared gradients.
     ///
     /// Shape: [param_index][row][col], matching every matrix in `params`.
+    /// `sq_avg[idx][i][j]` belongs to `params[idx].data[i][j]`.
+    ///
     /// This is intentionally separate from `Param` because optimizer state
     /// belongs to the optimizer, not to the model weights.
     sq_avg: Vec<Vec<Vec<f32>>>,
@@ -66,12 +75,18 @@ impl Optimizer for RMSProp {
                     // Running squared-gradient average:
                     // New gradients contribute `(1 - decay_rate) * g^2`.
                     // Old history remains through `decay_rate * sq_avg`.
+                    //
+                    // Formula:
+                    //   sq_avg = decay_rate * sq_avg + (1 - decay_rate) * g^2
                     self.sq_avg[idx][i][j] =
                         self.decay_rate * self.sq_avg[idx][i][j] + (1.0 - self.decay_rate) * g * g;
 
                     // Adaptive weight update:
                     // divide by root-mean-square gradient so frequently large
                     // gradients do not take uncontrolled large steps.
+                    //
+                    // Formula:
+                    //   weight = weight - lr * g / (sqrt(sq_avg) + epsilon)
                     param.data[i][j] -= self.lr * g / (self.sq_avg[idx][i][j].sqrt() + self.epsilon)
                 }
             }

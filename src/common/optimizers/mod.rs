@@ -4,8 +4,14 @@
 // - `Param` is re-exported here for old optimizer-facing imports, but its
 //   actual home is `common::param` because model layers own parameters.
 //
-// This keeps the public import stable:
-//   use llm_scratch_rs::common::optimizers::{Optimizer, Param, SGD};
+// This keeps public imports stable:
+//   use llm_scratch_rs::common::optimizers::{Adam, Optimizer, Param, SGD};
+//
+// Learning note:
+// - SGD has no memory.
+// - SGDM stores direction memory (`velocity`).
+// - RMSProp stores gradient-size memory (`sq_avg`).
+// - Adam stores both direction memory (`m`) and gradient-size memory (`v`).
 pub mod adam;
 pub mod optimizer;
 pub mod rmsprop;

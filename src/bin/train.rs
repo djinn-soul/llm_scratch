@@ -6,7 +6,7 @@ use llm_scratch_rs::{
     common::{
         dataloader::DataLoader,
         loss::{cross_entropy_backward, cross_entropy_loss},
-        optimizers::{Optimizer, Adam},
+        optimizers::{Optimizer, Adam,SGD},
         serilization::SaveableModel,
     },
     models::gpt::GPT,
@@ -58,7 +58,7 @@ fn main() {
     let num_heads = 2;
     let d_ff = 32;
     let num_blocks = 2;
-    let learning_rate = 0.0001;
+    let learning_rate = 0.001;
 
     let mut gpt = GPT::new(
         vocab_size,

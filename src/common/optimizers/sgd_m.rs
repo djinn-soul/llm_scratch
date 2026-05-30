@@ -10,10 +10,18 @@ use super::Optimizer;
 ///   velocity = momentum * velocity + lr * grad
 ///   weight   = weight - velocity
 ///
+/// Read the velocity formula as:
+///   - keep `momentum` percent of the previous direction.
+///   - add the new gradient step for this training example/batch.
+///
 /// Intuition:
 ///   - repeated gradients in the same direction build speed.
 ///   - alternating gradients partially cancel out.
 ///   - this usually gives smoother movement through noisy loss landscapes.
+///
+/// Difference from Adam:
+///   SGDM remembers direction only. It does not track squared gradients, so it
+///   does not shrink steps separately for weights with large gradient history.
 pub struct SGDM {
     /// Base learning rate used when adding the current gradient to velocity.
     pub lr: f32,
@@ -26,6 +34,8 @@ pub struct SGDM {
     /// Per-parameter velocity buffers.
     ///
     /// Shape: [param_index][row][col], matching every matrix in `params`.
+    /// `velocity[idx][i][j]` is the previous accumulated step for
+    /// `params[idx].data[i][j]`.
     pub velocity: Vec<Vec<Vec<f32>>>,
 }
 
@@ -61,11 +71,16 @@ impl Optimizer for SGDM {
                     // Momentum update:
                     // carry forward part of the previous velocity, then add
                     // the current gradient scaled by the learning rate.
+                    //
+                    // Formula:
+                    //   velocity = momentum * velocity + lr * grad
                     self.velocity[idx][i][j] =
                         self.momentum * self.velocity[idx][i][j] + self.lr * g;
 
                     // Weight update:
-                    // move opposite the accumulated velocity.
+                    //   weight = weight - velocity
+                    //
+                    // We subtract because gradients point uphill in loss.
                     param.data[i][j] -= self.velocity[idx][i][j];
                 }
             }
