@@ -20,7 +20,7 @@
 // https://machinelearningmastery.com/the-attention-mechanism-from-scratch/
 // ════════════════════════════════════════════════════════════════════════════
 use crate::attention::self_attention::SelfAttention;
-use crate::common::optimizers::Param;
+use crate::common::param::Param;
 use crate::common::util::{mat_transpose, matmul, random_matrix};
 
 // heads:     num_heads independent SelfAttention layers, each width d_model/num_heads
@@ -61,7 +61,7 @@ impl MultiHeadAttention {
 
         Self {
             heads,
-            w_o: Param::new(w_o, vec![vec![0.0; d_model]; num_heads * d_v]), // Gradients initialized to 0.0
+            w_o: Param::new(w_o),
             num_heads,
             d_model,
             cache_concatenated: Vec::new(),

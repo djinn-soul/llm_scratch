@@ -1,4 +1,6 @@
-use super::{Optimizer, Param};
+use crate::common::param::Param;
+
+use super::Optimizer;
 
 /// SGD with Momentum.
 ///
@@ -24,8 +26,7 @@ pub struct SGDM {
     /// Per-parameter velocity buffers.
     ///
     /// Shape: [param_index][row][col], matching every matrix in `params`.
-    /// The field name is kept as-is to avoid behavior/API churn in this pass.
-    pub velociy: Vec<Vec<Vec<f32>>>,
+    pub velocity: Vec<Vec<Vec<f32>>>,
 }
 
 impl SGDM {
@@ -33,20 +34,19 @@ impl SGDM {
         Self {
             lr,
             momentum,
-            velociy: Vec::new(),
+            velocity: Vec::new(),
         }
     }
 }
 
 impl Optimizer for SGDM {
     fn step(&mut self, params: &mut [&mut Param]) {
-        if self.velociy.is_empty() {
+        if self.velocity.is_empty() {
             // Lazy initialization:
             // create one zero-filled velocity buffer per parameter matrix.
             // This keeps the constructor independent from model shape.
             for param in params.iter() {
-                self.velociy
-                    .push(vec![vec![0.0; param.data[0].len()]; param.data.len()]);
+                self.velocity.push(param.zeros_like_data());
             }
         }
 
@@ -61,11 +61,12 @@ impl Optimizer for SGDM {
                     // Momentum update:
                     // carry forward part of the previous velocity, then add
                     // the current gradient scaled by the learning rate.
-                    self.velociy[idx][i][j] = self.momentum * self.velociy[idx][i][j] + self.lr * g;
+                    self.velocity[idx][i][j] =
+                        self.momentum * self.velocity[idx][i][j] + self.lr * g;
 
                     // Weight update:
                     // move opposite the accumulated velocity.
-                    param.data[i][j] -= self.velociy[idx][i][j];
+                    param.data[i][j] -= self.velocity[idx][i][j];
                 }
             }
         }

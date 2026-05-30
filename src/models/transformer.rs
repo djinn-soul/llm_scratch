@@ -21,7 +21,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 
 use crate::attention::multi_head_attention::MultiHeadAttention;
-use crate::common::optimizers::Param;
+use crate::common::param::Param;
 use crate::common::util::{add_mat, random_matrix};
 use crate::layers::feed_forward::FeedForward;
 use crate::layers::layer_norm::LayerNorm;

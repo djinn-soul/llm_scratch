@@ -1,4 +1,6 @@
-use super::{Optimizer, Param};
+use crate::common::param::Param;
+
+use super::Optimizer;
 
 /// Stochastic Gradient Descent (SGD) — the simplest optimizer.
 ///

@@ -1,15 +1,14 @@
 // https://dubeyrahul.github.io/posts/llm-from-scratch/token-embeddings.html
 // https://www.yadavsaurabh.com/building-a-transformer-llm-with-code-evolution-of-positional-encoding/
+use crate::common::param::Param;
 use crate::common::util::add;
 use rand::RngExt;
-use crate::common::optimizers::Param;
 
 pub struct TokenEmbedding {
     weight: Param, //[vocab_size][d_model]
     // BACKWARD: gradient table mirrors `weight`.
     // Each output-row gradient is scattered back into its token row; repeated
     // token IDs accumulate into the same `d_weight[token_id]` row.
-
     pub vocab_size: usize,
     pub d_model: usize, // dimension of token embedding
 }
@@ -19,7 +18,6 @@ pub struct PositionalEmbedding {
     // BACKWARD: gradient table mirrors `weight`.
     // Each sequence position accumulates into the matching absolute-position
     // row: position 0 -> d_weight[0], position 1 -> d_weight[1], etc.
-
     pub max_seq_len: usize,
     pub d_model: usize, // dimension of positional embedding
 }
@@ -31,7 +29,7 @@ impl TokenEmbedding {
             .map(|_| (0..d_model).map(|_| rng.random_range(-1.0..1.0)).collect())
             .collect();
         Self {
-            weight: Param::new(weight_data, vec![vec![0.0; d_model]; vocab_size]),
+            weight: Param::new(weight_data),
             vocab_size,
             d_model,
         }
@@ -75,7 +73,7 @@ impl PositionalEmbedding {
             .map(|_| (0..d_model).map(|_| rng.random_range(-1.0..1.0)).collect())
             .collect();
         Self {
-            weight: Param::new(weight_data, vec![vec![0.0; d_model]; max_seq_len]),
+            weight: Param::new(weight_data),
             max_seq_len,
             d_model,
         }

@@ -29,7 +29,7 @@
 // gamma: per-feature scale  [d_model] — learned, init 1.0
 // beta:  per-feature shift  [d_model] — learned, init 0.0
 // eps:   stability constant            — fixed ~1e-5, never trained
-use crate::common::optimizers::Param;
+use crate::common::param::Param;
 
 pub struct LayerNorm {
     pub gamma: Param, //  // Wrapped 1D parameter: [1][d_model] [d_model] — scale, init 1.0
@@ -46,14 +46,8 @@ impl LayerNorm {
     // Build LayerNorm for a given model width. γ=1, β=0 → identity at start.
     pub fn new(d_model: usize) -> Self {
         Self {
-            gamma: Param::new(
-                vec![vec![1.0; d_model]], // data
-                vec![vec![0.0; d_model]], // grads
-            ),
-            beta: Param::new(
-                vec![vec![0.0; d_model]], // data
-                vec![vec![0.0; d_model]], // grads
-            ),
+            gamma: Param::new(vec![vec![1.0; d_model]]),
+            beta: Param::new(vec![vec![0.0; d_model]]),
             eps: 1e-5,
             cache_x_hat: Vec::new(),
             cache_std: Vec::new(),
@@ -228,7 +222,7 @@ impl LayerNorm {
         d_x
     }
     pub fn parameters(&mut self) -> Vec<&mut Param> {
-        vec![&mut self.gamma, &mut self.beta]   
+        vec![&mut self.gamma, &mut self.beta]
     }
 }
 

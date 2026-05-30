@@ -21,7 +21,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 
 use crate::common::activation::softmax;
-use crate::common::optimizers::Param;
+use crate::common::param::Param;
 use crate::common::util::{mat_transpose, matmul, random_matrix};
 
 // w_q / w_k / w_v: learned projection matrices, shape [d_model][d_k or d_v]
@@ -50,9 +50,9 @@ impl SelfAttention {
     // reused for every forward pass (they only change during training).
     pub fn new(d_model: usize, d_k: usize, d_v: usize) -> SelfAttention {
         SelfAttention {
-            w_q: Param::new(random_matrix(d_model, d_k), vec![vec![0.0; d_k]; d_model]),
-            w_k: Param::new(random_matrix(d_model, d_k), vec![vec![0.0; d_k]; d_model]),
-            w_v: Param::new(random_matrix(d_model, d_v), vec![vec![0.0; d_v]; d_model]),
+            w_q: Param::new(random_matrix(d_model, d_k)),
+            w_k: Param::new(random_matrix(d_model, d_k)),
+            w_v: Param::new(random_matrix(d_model, d_v)),
             d_model,
             d_k,
             d_v,

@@ -1,4 +1,4 @@
-use super::Param;
+use crate::common::param::Param;
 
 /// The `Optimizer` trait defines the contract every optimizer must implement.
 ///

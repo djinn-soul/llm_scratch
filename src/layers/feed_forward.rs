@@ -18,7 +18,7 @@
 // until back-propagation is added.
 // https://sebastianraschka.com/blog/2023/self-attention-from-scratch.html
 // ════════════════════════════════════════════════════════════════════════════
-use crate::common::optimizers::Param;
+use crate::common::param::Param;
 use crate::common::util::{mat_transpose, matmul};
 // w_1: expansion weights  [d_model][d_ff]  — widens each token vector
 // w_2: shrink weights     [d_ff][d_model]  — restores original width
@@ -41,8 +41,8 @@ impl FeedForward {
     // from training in production).
     pub fn new(w_1: Vec<Vec<f32>>, w_2: Vec<Vec<f32>>, d_model: usize, d_ff: usize) -> Self {
         Self {
-            w_1: Param::new(w_1, vec![vec![0.0; d_ff]; d_model]),
-            w_2: Param::new(w_2, vec![vec![0.0; d_model]; d_ff]),
+            w_1: Param::new(w_1),
+            w_2: Param::new(w_2),
             d_model,
             d_ff,
             cache_x: Vec::new(),

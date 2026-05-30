@@ -1,6 +1,6 @@
+use crate::common::param::Param;
 use std::fs::File;
 use std::io::{Read, Write};
-use crate::common::optimizers::Param;
 
 pub trait SaveableModel {
     /// Every model must implement this method to recursively return mutable references
@@ -19,18 +19,18 @@ pub trait SaveableModel {
             // ── SAVE AS RAW BINARY BYTES ──────────────────────────────────────
             let mut file = File::create(path)?;
             let params = self.parameters();
-            
+
             // 1. Write total number of matrices (64-bit unsigned integer)
             file.write_all(&(params.len() as u64).to_le_bytes())?;
-            
+
             for param in params {
                 let rows = param.data.len() as u64;
                 let cols = param.data[0].len() as u64;
-                
+
                 // 2. Write shape dimensions
                 file.write_all(&rows.to_le_bytes())?;
                 file.write_all(&cols.to_le_bytes())?;
-                
+
                 // 3. Write float elements (4 bytes each)
                 for row in &param.data {
                     for &val in row {
@@ -49,24 +49,40 @@ pub trait SaveableModel {
             let json = std::fs::read_to_string(path)?;
             let weights: Vec<Vec<Vec<f32>>> = serde_json::from_str(&json)?;
             let mut params = self.parameters();
-            
-            assert_eq!(params.len(), weights.len(), "Weight matrices count mismatch!");
+
+            assert_eq!(
+                params.len(),
+                weights.len(),
+                "Weight matrices count mismatch!"
+            );
             for (param, weight) in params.iter_mut().zip(weights.into_iter()) {
-                assert_eq!(param.data.len(), weight.len(), "Dimension mismatch in rows!");
-                assert_eq!(param.data[0].len(), weight[0].len(), "Dimension mismatch in cols!");
+                assert_eq!(
+                    param.data.len(),
+                    weight.len(),
+                    "Dimension mismatch in rows!"
+                );
+                assert_eq!(
+                    param.data[0].len(),
+                    weight[0].len(),
+                    "Dimension mismatch in cols!"
+                );
                 param.data = weight;
             }
         } else {
             // ── LOAD FROM RAW BINARY BYTES ───────────────────────────────────
             let mut file = File::open(path)?;
             let mut params = self.parameters();
-            
+
             // 1. Verify total number of matrices
             let mut num_matrices_buf = [0; 8];
             file.read_exact(&mut num_matrices_buf)?;
             let num_matrices = u64::from_le_bytes(num_matrices_buf) as usize;
-            assert_eq!(params.len(), num_matrices, "Weight matrices count mismatch!");
-            
+            assert_eq!(
+                params.len(),
+                num_matrices,
+                "Weight matrices count mismatch!"
+            );
+
             for param in &mut params {
                 // 2. Read and verify shape dimensions
                 let mut size_buf = [0; 8];
@@ -74,10 +90,10 @@ pub trait SaveableModel {
                 let rows = u64::from_le_bytes(size_buf) as usize;
                 file.read_exact(&mut size_buf)?;
                 let cols = u64::from_le_bytes(size_buf) as usize;
-                
+
                 assert_eq!(param.data.len(), rows, "Dimension mismatch in rows!");
                 assert_eq!(param.data[0].len(), cols, "Dimension mismatch in cols!");
-                
+
                 // 3. Read float bytes back into memory
                 for i in 0..rows {
                     for j in 0..cols {

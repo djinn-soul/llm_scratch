@@ -23,7 +23,7 @@
 // https://sebastianraschka.com/llms-from-scratch/
 // ════════════════════════════════════════════════════════════════════════════
 
-use crate::common::optimizers::Param;
+use crate::common::param::Param;
 use crate::common::serilization::SaveableModel;
 use crate::common::util::mat_transpose;
 use crate::common::util::matmul;
@@ -90,7 +90,7 @@ impl GPT {
             position_emb,
             blocks,
             norm,
-            lm_head: Param::new(lm_head_data, vec![vec![0.0; vocab_size]; d_model]),
+            lm_head: Param::new(lm_head_data),
             cache_blocks: Vec::new(),
             cache_embed: Vec::new(),
             cache_norm: Vec::new(),
