@@ -6,7 +6,7 @@ use llm_scratch_rs::{
     common::{
         dataloader::DataLoader,
         loss::{cross_entropy_backward, cross_entropy_loss},
-        optimizers::{Optimizer, RMSProp, SGDM},
+        optimizers::{Optimizer, RMSProp},
         serilization::SaveableModel,
     },
     models::gpt::GPT,
@@ -119,7 +119,7 @@ fn main() {
             // D. Backward Pass: compute and route gradients back through the entire network
             let d_logits = cross_entropy_backward(&logits, &target_slice);
             gpt.backward(&d_logits);
-            // E. Optimizer Step: update all parameter weights using SGD
+            // E. Optimizer Step: update all parameter weights.
             {
                 let mut params = gpt.parameters();
                 optimizer.step(&mut params);

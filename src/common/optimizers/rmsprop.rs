@@ -1,4 +1,6 @@
-use super::{Optimizer, Param};
+use crate::common::param::Param;
+
+use super::Optimizer;
 
 /// RMSProp keeps a running average of squared gradients for each weight.
 ///
@@ -49,8 +51,7 @@ impl Optimizer for RMSProp {
             // the model will pass in. On the first update, create one zero
             // buffer per parameter with the exact same 2D shape.
             for param in params.iter() {
-                self.sq_avg
-                    .push(vec![vec![0.0; param.data[0].len()]; param.data.len()]);
+                self.sq_avg.push(param.zeros_like_data());
             }
         }
 
