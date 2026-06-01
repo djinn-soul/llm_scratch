@@ -6,6 +6,7 @@ use llm_scratch_rs::{
     common::{
         dataloader::DataLoader,
         loss::{cross_entropy_backward, cross_entropy_loss},
+        lr_scheduler::LRScheduler,
         optimizers::{AdamW, ClippingStrategy, Optimizer},
         serilization::SaveableModel,
     },
@@ -65,8 +66,8 @@ fn main() {
         all_tokens.len(),
         all_tokens
     );
-    // 90% training / 10% validation split sequentially
-    let split_idx = (all_tokens.len() as f32 * 0.9) as usize;
+    // 80% training / 20% validation split sequentially
+    let split_idx = (all_tokens.len() as f32 * 0.8) as usize;
     let train_tokens = all_tokens[..split_idx].to_vec();
     let val_tokens = all_tokens[split_idx..].to_vec();
     println!(
@@ -91,12 +92,22 @@ fn main() {
     let num_heads = 2;
     let d_ff = 32;
     let num_blocks = 2;
+    let epochs = 80;
+
     // AdamW hyperparameters:
     //   lr=3e-4  — the "Karpathy constant", safe default for LLM training with Adam
     //   wd=0.01  — standard weight decay used in GPT-2, BERT, and LLaMA training
     let learning_rate = 3e-4;
     let weight_decay = 0.01;
-
+    let steps_per_epoch = train_loader.len();
+    let total_steps = epochs * steps_per_epoch;
+    let warmup_steps = (total_steps as f32 * 0.1) as usize; // 10% warmup
+    let scheduler = LRScheduler::CosineWarmup {
+        max_lr: 3e-4,
+        min_lr: 1e-5,
+        warmup_steps,
+        total_steps,
+    };
     let mut gpt = GPT::new(
         vocab_size,
         d_model,
@@ -108,11 +119,7 @@ fn main() {
     // Initialize AdamW — Adam with decoupled weight decay
     // Weight decay shrinks weights each step: w *= (1 - lr * wd)
     // This prevents overfitting without corrupting Adam's moment buffers.
-    let mut optimizer = AdamW::new(
-        learning_rate,
-        weight_decay,
-        ClippingStrategy::Norm(1.0),
-    );
+    let mut optimizer = AdamW::new(learning_rate, weight_decay, ClippingStrategy::Norm(1.0));
 
     println!(
         "Initialized mini-GPT and AdamW optimizer (lr = {:.0e}, wd = {}).\n",
@@ -128,15 +135,19 @@ fn main() {
     );
 
     // 7. Training Loop using our manual backpropagation and DataLoader
+    let mut global_step = 0; // <--- Track global steps across epochs
+
     let start_time = Instant::now();
     println!("\n[3/5] Starting manual backpropagation training loop...");
-    let epochs = 80;
     for epoch in 1..=epochs {
         let mut steps = 0;
         let spinner = ["|", "/", "-", "\\"];
 
         // Iterate over the dataset using the generic DataLoader iterator
         for (input_slice, target_slice) in train_loader.iter() {
+            // Update the optimizer's learning rate dynamically from the scheduler!
+            optimizer.lr = scheduler.get_lr(global_step);
+
             // A. Zero out gradients from previous step
             {
                 let mut params = gpt.parameters();
@@ -165,6 +176,7 @@ fn main() {
                 let mut params = gpt.parameters();
                 optimizer.step(&mut params);
             }
+            global_step += 1; // <--- Increment global step
         }
         // Clear the spinner line cleanly
         print!("\r                                         \r");

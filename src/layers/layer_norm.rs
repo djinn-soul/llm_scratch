@@ -32,10 +32,9 @@
 use crate::common::param::Param;
 
 pub struct LayerNorm {
-    pub gamma: Param, //  // Wrapped 1D parameter: [1][d_model] [d_model] — scale, init 1.0
-    pub beta: Param,  //  // Wrapped 1D parameter: [1][d_model][d_model] — shift, init 0.0
-    pub eps: f32,     // ~1e-5, prevents div-by-zero
-
+    pub gamma: Param,           // Wrapped row parameter: [1][d_model] — scale, init 1.0
+    pub beta: Param,            // Wrapped row parameter: [1][d_model] — shift, init 0.0
+    pub eps: f32,               // ~1e-5, prevents div-by-zero
     cache_x_hat: Vec<Vec<f32>>, // normalized values per row, before gamma/beta
     cache_std: Vec<f32>,        // std_dev per row
     pub d_gamma: Vec<f32>,

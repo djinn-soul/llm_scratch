@@ -1,6 +1,7 @@
 pub mod activation;
 pub mod dataloader;
 pub mod loss;
+pub mod lr_scheduler;
 pub mod optimizers;
 pub mod param;
 pub mod serilization;

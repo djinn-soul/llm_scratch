@@ -1,6 +1,6 @@
 // https://www.gilesthomas.com/2026/02/llm-from-scratch-32b-interventions-gradient-clipping
 /// Gradient clipping policy applied before an optimizer updates weights.
-/// 
+///
 /// This belongs to the optimizer layer because clipping is training policy,
 /// not part of a parameter's stored data/gradient shape.
 ///
