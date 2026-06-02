@@ -10,5 +10,16 @@ path = "src/lib.rs"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.150"
 regex-lite = "0.1"
-reqwest = { version = "0.13.3", features = ["blocking"] }
+reqwest = { version = "0.13.4", features = ["blocking"] }
 rand = "0.10.1"
+
+# Candle ML framework — tensor ops and weight loading
+candle-core = "0.10"
+candle-nn = "0.10"
+# HuggingFace Hub — download weights + config
+hf-hub = { version = "0.5.0", features = ["tokio"] }
+# HuggingFace tokenizers — official GPT-2 BPE tokenizer (tiktoken-compatible)
+tokenizers = "0.23.1"
+# Error handling convenience
+anyhow = "1.0"
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros"] }
