@@ -25,24 +25,24 @@ remain understandable without needing to remember chapter numbers.
 
 ## Status
 
-Maps to chapters of *LLMs from Scratch* (Sebastian Raschka):
+Maps to chapters of _LLMs from Scratch_ (Sebastian Raschka):
 
-| Topic | Book Ch. | Status |
-|---|---|---|
-| Tokenizer trait | infra | Done |
-| Byte Pair Encoding (BPE) | Ch 2 | Done |
-| SentencePiece (Unigram LM) | Ch 2 extension | Done |
-| Data loaders | Ch 2 | Next |
-| Token + positional embeddings | Ch 2 / Ch 4 | Done |
-| Self-attention | Ch 3 | Done |
-| Multi-head attention | Ch 3 | Done |
-| Feed-forward network | Ch 4 | Done |
-| LayerNorm | Ch 4 | Done |
-| Transformer block | Ch 4 | Done |
-| Full GPT model | Ch 4 | Next |
-| Training loop | Ch 5 | Not started |
-| Sampling / generation | Ch 5 | Not started |
-| Fine-tuning | Ch 6+7 | Not started |
+| Topic                         | Book Ch.       | Status      |
+| ----------------------------- | -------------- | ----------- |
+| Tokenizer trait               | infra          | Done        |
+| Byte Pair Encoding (BPE)      | Ch 2           | Done        |
+| SentencePiece (Unigram LM)    | Ch 2 extension | Done        |
+| Data loaders                  | Ch 2           | Next        |
+| Token + positional embeddings | Ch 2 / Ch 4    | Done        |
+| Self-attention                | Ch 3           | Done        |
+| Multi-head attention          | Ch 3           | Done        |
+| Feed-forward network          | Ch 4           | Done        |
+| LayerNorm                     | Ch 4           | Done        |
+| Transformer block             | Ch 4           | Done        |
+| Full GPT model                | Ch 4           | Next        |
+| Training loop                 | Ch 5           | Not started |
+| Sampling / generation         | Ch 5           | Not started |
+| Fine-tuning                   | Ch 6+7         | Not started |
 
 **Requires:** Rust 1.70+ (edition 2021).
 
@@ -152,13 +152,13 @@ pieces.
 
 ## BPE vs Unigram
 
-| | BPE | Unigram |
-|---|---|---|
-| Direction | Bottom-up merge pairs | Top-down prune pieces |
-| Main operation | frequent-pair merge | probabilistic segmentation |
-| Encoding | greedy merge application | Viterbi search |
-| Probabilities | no token probabilities | token log-probabilities |
-| Common usage | GPT-style tokenizers | SentencePiece-style tokenizers |
+|                | BPE                      | Unigram                        |
+| -------------- | ------------------------ | ------------------------------ |
+| Direction      | Bottom-up merge pairs    | Top-down prune pieces          |
+| Main operation | frequent-pair merge      | probabilistic segmentation     |
+| Encoding       | greedy merge application | Viterbi search                 |
+| Probabilities  | no token probabilities   | token log-probabilities        |
+| Common usage   | GPT-style tokenizers     | SentencePiece-style tokenizers |
 
 ## Current Model Stack
 
@@ -194,6 +194,20 @@ The current transformer demo checks that one block preserves shape:
 - [ ] Loss and optimizer
 - [ ] Tiny training loop
 - [ ] Generation and sampling
+
+## TODO
+
+- [ ] 1. Rebuild your mini GPT in Candle
+- [ ]2. Add Candle autograd training
+- [ ] 3. Add Candle generation with top-k/top-p
+- [ ] 4. Add KV cache
+- [ ] 5. Load GPT-2 or small HF model with Candle
+- [ ]6. Learn safetensors
+- [ ] 7. Learn quantization
+- [ ]8. Learn LoRA / QLoRA
+- [ ] 9. Build Axum inference API
+- [ ]10. Try Burn for training abstraction
+- [ ] 11. Learn PyTorch/HF for industry workflows
 
 ## Next Step
 
