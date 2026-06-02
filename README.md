@@ -198,16 +198,37 @@ The current transformer demo checks that one block preserves shape:
 ## TODO
 
 - [ ] 1. Rebuild your mini GPT in Candle
-- [ ]2. Add Candle autograd training
+- [ ] 2. Add Candle autograd training
 - [ ] 3. Add Candle generation with top-k/top-p
 - [ ] 4. Add KV cache
 - [ ] 5. Load GPT-2 or small HF model with Candle
-- [ ]6. Learn safetensors
+- [ ] 6. Learn safetensors
 - [ ] 7. Learn quantization
-- [ ]8. Learn LoRA / QLoRA
+- [ ] 8. Learn LoRA / QLoRA
 - [ ] 9. Build Axum inference API
-- [ ]10. Try Burn for training abstraction
+- [ ] 10. Try Burn for training abstraction
 - [ ] 11. Learn PyTorch/HF for industry workflows
+- [ ] 12. Fine-tuning for classification
+    - [ ] 6.1 Different categories of fine-tuning
+    - [ ] 6.2 Preparing the dataset
+    - [ ] 6.3 Creating data loaders
+    - [ ] 6.4 Initializing a model with pretrained weights
+    - [ ] 6.5 Adding a classification head
+    - [ ] 6.6 Calculating the classification loss and accuracy
+    - [ ] 6.7 Fine-tuning the model on supervised data
+    - [ ] 6.8 Using the LLM as a spam classifier
+- [ ] 13. Fine-tuning to follow instructions
+    - [ ] 7.1 Introduction to instruction fine-tuning
+    - [ ] 7.2 Preparing a dataset for supervised instruction fine-tuning
+    - [ ] 7.3 Organizing data into training batches
+        - [ ] Why replacement by -100
+    - [ ] 7.4 Creating data loaders for an instruction dataset
+    - [ ] 7.5 Loading a pretrained LLM
+    - [ ] 7.6 Fine-tuning the LLM on instruction data
+    - [ ] 7.7 Extracting and saving responses
+    - [ ] 7.8 Evaluating the fine-tuned LLM
+    - [ ] 7.9 Conclusions
+    - [ ] 7.10 Summary
 
 ## Next Step
 
