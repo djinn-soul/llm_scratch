@@ -6,3 +6,4 @@ pub mod optimizers;
 pub mod param;
 pub mod serilization;
 pub mod util;
+pub mod sampling;

@@ -518,13 +518,12 @@ impl BytePair {
                 if !decoded.ends_with(" ") && decoded.len() > 0 {
                     decoded.push_str(" ");
                 }
-            } else if token.starts_with("Ġ") {
-                decoded.push_str(&format!(" {}", &token['Ġ'.len_utf8()..]));
             } else {
                 decoded.push_str(token);
             }
         }
-        Ok(decoded)
+        let clean = decoded.replace('Ġ', " ");
+        Ok(clean)
     }
 
     // Save vocab and bpe_merges to JSON files for later loading

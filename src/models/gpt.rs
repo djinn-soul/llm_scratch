@@ -24,6 +24,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 
 use crate::common::param::Param;
+use crate::common::sampling::sample_next_token;
 use crate::common::serilization::SaveableModel;
 use crate::common::util::mat_transpose;
 use crate::common::util::matmul;
@@ -161,41 +162,75 @@ impl GPT {
         self.position_emb.backward(seq_len, &d_x);
     }
 
-    pub fn generate(&mut self, context: &[usize], max_new_tokens: usize) -> Vec<usize> {
+    // Gready old sampling method
+    // pub fn generate(&mut self, context: &[usize], max_new_tokens: usize) -> Vec<usize> {
+    //     let mut tokens = context.to_vec();
+    //     let max_seq_len = self.position_emb.max_seq_len;
+
+    //     for _ in 0..max_new_tokens {
+    //         // ── STEP 1: CROP TO THE MODEL'S CONTEXT WINDOW ─────────────────
+    //         // Positional embeddings only exist for max_seq_len positions.
+    //         let start_idx = if tokens.len() > max_seq_len {
+    //             tokens.len() - max_seq_len
+    //         } else {
+    //             0
+    //         };
+
+    //         let cropped_tokens = &tokens[start_idx..];
+
+    //         // ── STEP 2: SCORE THE CURRENT CONTEXT ──────────────────────────
+    //         let logits = self.forward(&cropped_tokens);
+
+    //         // ── STEP 3: USE THE LAST POSITION FOR NEXT-TOKEN PREDICTION ────
+    //         let last_logits = logits.last().unwrap();
+
+    //         // ── STEP 4: GREEDY DECODE ──────────────────────────────────────
+    //         // Pick the highest-scoring vocabulary ID. Sampling comes later.
+    //         let mut best_id = 0;
+    //         let mut highest_score = f32::NEG_INFINITY;
+
+    //         for (id, score) in last_logits.iter().enumerate() {
+    //             if score > &highest_score {
+    //                 highest_score = *score;
+    //                 best_id = id;
+    //             }
+    //         }
+    //         tokens.push(best_id);
+    //     }
+    //     tokens
+    // }
+    /// Autoregressive text generation using advanced sampling strategies (Temperature, Top-K, Top-P)
+    pub fn generate_sample(
+        &mut self,
+        context: &[usize],
+        max_new_tokens: usize,
+        temperature: f32,
+        top_k: Option<usize>,
+        top_p: Option<f32>,
+    ) -> Vec<usize> {
         let mut tokens = context.to_vec();
         let max_seq_len = self.position_emb.max_seq_len;
-
         for _ in 0..max_new_tokens {
             // ── STEP 1: CROP TO THE MODEL'S CONTEXT WINDOW ─────────────────
-            // Positional embeddings only exist for max_seq_len positions.
             let start_idx = if tokens.len() > max_seq_len {
                 tokens.len() - max_seq_len
             } else {
                 0
             };
-
             let cropped_tokens = &tokens[start_idx..];
-
             // ── STEP 2: SCORE THE CURRENT CONTEXT ──────────────────────────
             let logits = self.forward(&cropped_tokens);
-
             // ── STEP 3: USE THE LAST POSITION FOR NEXT-TOKEN PREDICTION ────
             let last_logits = logits.last().unwrap();
-
-            // ── STEP 4: GREEDY DECODE ──────────────────────────────────────
-            // Pick the highest-scoring vocabulary ID. Sampling comes later.
-            let mut best_id = 0;
-            let mut highest_score = f32::NEG_INFINITY;
-
-            for (id, score) in last_logits.iter().enumerate() {
-                if score > &highest_score {
-                    highest_score = *score;
-                    best_id = id;
-                }
-            }
-            tokens.push(best_id);
+            // ── STEP 4: ADVANCED DECODING AND SAMPLING ─────────────────────
+            let next_token = sample_next_token(last_logits, temperature, top_k, top_p);
+            tokens.push(next_token);
         }
         tokens
+    }
+    /// Standard autoregressive text generation using Greedy Decoding (backwards compatible)
+    pub fn generate(&mut self, context: &[usize], max_new_tokens: usize) -> Vec<usize> {
+        self.generate_sample(context, max_new_tokens, 0.0, None, None)
     }
 }
 
