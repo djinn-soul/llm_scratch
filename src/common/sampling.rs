@@ -7,39 +7,39 @@ use crate::common::activation::softmax;
 /// ```text
 /// ── STEP 0: RAW LOGITS INPUT (from GPT model head) ──────────────────────────────────
 /// Let's say: logits = [2.0,  1.0,  5.0,  0.5,  3.0]
-/// 
+///
 /// ── STEP 1: TEMPERATURE SCALING (with T = 0.5) ──────────────────────────────────────
 /// Each raw logit is divided by T (dividing by 0.5 multiplies all values by 2):
 ///   scaled_logits = logits / 0.5
 ///                 = [4.0,  2.0,  10.0,  1.0,  6.0]
-/// 
+///
 /// ── STEP 2: TOP-K FILTERING (with K = 3) ────────────────────────────────────────────
 /// 1. We clone and sort scores descending: [10.0 (C), 6.0 (E), 4.0 (A), 2.0 (B), 1.0 (D)]
 /// 2. Threshold is the K-th (3rd) value: threshold = 4.0 (A)
 /// 3. Any score strictly less than 4.0 is eliminated by set to -infinity (-inf):
 ///   scaled_logits = [4.0, -inf,  10.0, -inf,  6.0]   <-- (B and D are masked out)
-/// 
+///
 /// ── STEP 3: TOP-P (NUCLEUS) FILTERING (with P = 0.99) ──────────────────────────────
 /// 1. Run a temporary Softmax on current scaled_logits:
 ///      exps  = [e^4,  e^-inf, e^10,    e^-inf, e^6]  = [54.6, 0.0, 22026.5, 0.0, 403.4]
 ///      probs = exps / sum(exps)                     = [0.0024, 0.0, 0.9796, 0.0, 0.0179]
 ///                                                    (A: 0.24%, C: 97.96%, E: 1.79%)
-/// 
+///
 /// 2. Sort probabilities descending with original indices:
 ///      [(Index 2 (C), 97.96%), (Index 4 (E), 1.79%), (Index 0 (A), 0.24%), ...]
-/// 
+///
 /// 3. Accumulate sum up to P = 0.99:
 ///      - Token C: cumulative = 97.96% (Keep C, cumulative < 99.0%, continue)
 ///      - Token E: cumulative = 97.96% + 1.79% = 99.75% (Keep E, cumulative >= 99.0%, break!)
 ///      - Token A: Excluded!
-/// 
+///
 /// 4. Mask out any token not in the kept nucleus:
 ///   scaled_logits = [-inf, -inf,  10.0, -inf,  6.0]  <-- (Token A is now masked out)
-/// 
+///
 /// ── STEP 4: FINAL SOFTMAX ──────────────────────────────────────────────────────────
 /// Run Softmax on the final scaled_logits:
 ///   final_probs = [0.0,   0.0,    0.982,  0.0,   0.018]  (C is 98.2% likely, E is 1.8% likely)
-/// 
+///
 /// ── STEP 5: ROULETTE-WHEEL WEIGHTED INDEX SELECTION ─────────────────────────────────
 /// 1. Draw a random decimal R in [0.0, 1.0). Let's say: R = 0.99
 /// 2. Scan the tokens and add probabilities:
@@ -95,7 +95,8 @@ pub fn sample_next_token(
 
             // Pair probabilities with original indices and sort descending
             let mut indexed_probs: Vec<(usize, f32)> = probs.iter().copied().enumerate().collect();
-            indexed_probs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            indexed_probs
+                .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
             // Accumulate probabilities up to P
             let mut cumulative_sum = 0.0;

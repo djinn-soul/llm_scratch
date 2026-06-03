@@ -1,5 +1,8 @@
 //https://jaykmody.com/blog/gpt-from-scratch/
-use llm_scratch_rs::{common::loss::cross_entropy_loss, models::gpt::GPT};
+use llm_scratch_rs::{
+    common::{loss::cross_entropy_loss, sampling::sample_next_token},
+    models::gpt::GPT,
+};
 
 fn main() {
     // 1. Hyperparameters for a miniature GPT (for fast smoke testing)
@@ -50,18 +53,22 @@ fn main() {
 
     println!("Initial Loss before training: {:.4}", loss);
     // 7. Test Autoregressive Generation!
-
-    println!("\n--- Testing Generation ---");
-    // We give the model a starting "prompt"
+    // 7. Test Autoregressive Generation with Streaming!
+    println!("\n--- Testing Generation (Streaming token IDs) ---");
     let prompt = vec![12, 45];
-    println!("Prompt tokens: {:?}", prompt);
+    print!("Prompt: {:?}", prompt);
+    std::io::Write::flush(&mut std::io::stdout()).unwrap();
 
-    // Ask the model to generate 10 new tokens based on the prompt
-    let generated = gpt.generate(&prompt, 10);
+    let mut current_tokens = prompt.clone();
+    for _ in 0..10 {
+        let logits = gpt.forward(&current_tokens);
+        let last_logits = logits.last().unwrap();
+        // Greedy sampling (temperature = 0.0)
+        let next_token = sample_next_token(last_logits, 0.0, None, None);
+        current_tokens.push(next_token);
 
-    println!("Final sequence: {:?}", generated);
-
-    println!(
-        "✅ Smoke test passed! The GPT architecture is fully connected and mathematically sound."
-    );
+        print!(" -> {}", next_token);
+        std::io::Write::flush(&mut std::io::stdout()).unwrap();
+    }
+    println!("\nFinal sequence: {:?}", current_tokens);
 }

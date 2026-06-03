@@ -16,11 +16,13 @@ remain understandable without needing to remember chapter numbers.
 - [Run](#run)
 - [Quick Start API](#quick-start-api)
 - [Tokenizer Trait](#tokenizer-trait)
-- [BPE](#bpe--byte-pair-encoding)
-- [SentencePiece](#sentencepiece--unigram-language-model)
+- [BPE](#bpe---byte-pair-encoding)
+- [SentencePiece](#sentencepiece---unigram-language-model)
 - [BPE vs Unigram](#bpe-vs-unigram)
 - [Current Model Stack](#current-model-stack)
 - [Roadmap](#roadmap)
+- [TODO](#todo)
+- [Next Step](#next-step)
 - [Dependencies](#dependencies)
 
 ## Status
@@ -32,17 +34,17 @@ Maps to chapters of _LLMs from Scratch_ (Sebastian Raschka):
 | Tokenizer trait               | infra          | Done        |
 | Byte Pair Encoding (BPE)      | Ch 2           | Done        |
 | SentencePiece (Unigram LM)    | Ch 2 extension | Done        |
-| Data loaders                  | Ch 2           | Next        |
+| Data loaders                  | Ch 2           | Done        |
 | Token + positional embeddings | Ch 2 / Ch 4    | Done        |
 | Self-attention                | Ch 3           | Done        |
 | Multi-head attention          | Ch 3           | Done        |
 | Feed-forward network          | Ch 4           | Done        |
 | LayerNorm                     | Ch 4           | Done        |
 | Transformer block             | Ch 4           | Done        |
-| Full GPT model                | Ch 4           | Next        |
-| Training loop                 | Ch 5           | Not started |
-| Sampling / generation         | Ch 5           | Not started |
-| Fine-tuning                   | Ch 6+7         | Not started |
+| Full GPT model                | Ch 4           | Done        |
+| Training loop                 | Ch 5           | Done        |
+| Sampling / generation         | Ch 5           | Done        |
+| Fine-tuning                   | Ch 6+7         | Next        |
 
 **Requires:** Rust 1.70+ (edition 2021).
 
@@ -189,14 +191,15 @@ The current transformer demo checks that one block preserves shape:
 - [x] Feed-forward network
 - [x] LayerNorm
 - [x] Transformer block
-- [ ] GPT model wrapper
-- [ ] Data loader for next-token prediction
-- [ ] Loss and optimizer
-- [ ] Tiny training loop
-- [ ] Generation and sampling
+- [x] GPT model wrapper
+- [x] Data loader for next-token prediction
+- [x] Loss and optimizer
+- [x] Tiny training loop
+- [x] Generation and sampling
 
 ## TODO
 
+### 1. Candle & PyTorch/HF Foundations (Modern Frameworks)
 - [ ] 1. Rebuild your mini GPT in Candle
 - [ ] 2. Add Candle autograd training
 - [ ] 3. Add Candle generation with top-k/top-p
@@ -204,31 +207,145 @@ The current transformer demo checks that one block preserves shape:
 - [ ] 5. Load GPT-2 or small HF model with Candle
 - [ ] 6. Learn safetensors
 - [ ] 7. Learn quantization
-- [ ] 8. Learn LoRA / QLoRA
+- [ ] 8. Try Burn for training abstraction
 - [ ] 9. Build Axum inference API
-- [ ] 10. Try Burn for training abstraction
-- [ ] 11. Learn PyTorch/HF for industry workflows
-- [ ] 12. Fine-tuning for classification
-    - [ ] 6.1 Different categories of fine-tuning
-    - [ ] 6.2 Preparing the dataset
-    - [ ] 6.3 Creating data loaders
-    - [ ] 6.4 Initializing a model with pretrained weights
-    - [ ] 6.5 Adding a classification head
-    - [ ] 6.6 Calculating the classification loss and accuracy
-    - [ ] 6.7 Fine-tuning the model on supervised data
-    - [ ] 6.8 Using the LLM as a spam classifier
-- [ ] 13. Fine-tuning to follow instructions
-    - [ ] 7.1 Introduction to instruction fine-tuning
-    - [ ] 7.2 Preparing a dataset for supervised instruction fine-tuning
-    - [ ] 7.3 Organizing data into training batches
+- [ ] 10. Learn PyTorch/HF for industry workflows
+
+### 2. Model Architectures & Core Implementations
+- [x] 11. Attention is all you need (Transformers)
+    - [x] 11.1 Implement causal scaled dot-product self-attention
+    - [x] 11.2 Implement Multi-Head Attention (MHA)
+    - [x] 11.3 Implement position-wise feed-forward networks (FFN)
+    - [x] 11.4 Implement Layer Normalization (LayerNorm)
+    - [x] 11.5 Assemble Transformer Block decoder with residual connections
+    - [x] 11.6 Wire into full GPT model architecture with weight tying
+- [ ] 12. BERT (Bidirectional Encoder Representation from Transformers)
+    - [ ] 12.1 Implement Masked Language Modeling (MLM) task
+    - [ ] 12.2 Implement Next Sentence Prediction (NSP) task
+    - [ ] 12.3 Implement bidirectional attention masking (no causal mask)
+    - [ ] 12.4 Load pretrained BERT weights/tokenize with WordPiece
+    - [ ] 12.5 Fine-tune BERT on text classification tasks
+- [ ] 13. LLaMA (Large Language Model Meta AI)
+    - [ ] 13.1 Implement Rotary Position Embeddings (RoPE)
+    - [ ] 13.2 Implement SwiGLU activation function
+    - [ ] 13.3 Implement RMSNorm (Root Mean Square Normalization)
+    - [ ] 13.4 Implement Grouped-Query Attention (GQA) and Multi-Query Attention (MQA)
+    - [ ] 13.5 Load pretrained LLaMA-style model weights (e.g., TinyLLaMA) in Rust
+- [ ] 14. MoE (Mixture of Experts)
+    - [ ] 14.1 Implement router/gating network (top-k routing)
+    - [ ] 14.2 Implement multiple feed-forward expert layers
+    - [ ] 14.3 Add auxiliary load balancing loss to prevent routing collapse
+    - [ ] 14.4 Verify routing path and expert utilization
+
+### 3. Fine-Tuning, PEFT, & Alignment
+- [ ] 15. Fine-tuning for classification
+    - [ ] 15.1 Different categories of fine-tuning
+    - [ ] 15.2 Preparing the dataset
+    - [ ] 15.3 Creating data loaders
+    - [ ] 15.4 Initializing a model with pretrained weights
+    - [ ] 15.5 Adding a classification head
+    - [ ] 15.6 Calculating the classification loss and accuracy
+    - [ ] 15.7 Fine-tuning the model on supervised data
+    - [ ] 15.8 Using the LLM as a spam classifier
+- [ ] 16. Fine-tuning to follow instructions
+    - [ ] 16.1 Introduction to instruction fine-tuning
+    - [ ] 16.2 Preparing a dataset for supervised instruction fine-tuning
+    - [ ] 16.3 Organizing data into training batches
         - [ ] Why replacement by -100
-    - [ ] 7.4 Creating data loaders for an instruction dataset
-    - [ ] 7.5 Loading a pretrained LLM
-    - [ ] 7.6 Fine-tuning the LLM on instruction data
-    - [ ] 7.7 Extracting and saving responses
-    - [ ] 7.8 Evaluating the fine-tuned LLM
-    - [ ] 7.9 Conclusions
-    - [ ] 7.10 Summary
+    - [ ] 16.4 Creating data loaders for an instruction dataset
+    - [ ] 16.5 Loading a pretrained LLM
+    - [ ] 16.6 Fine-tuning the LLM on instruction data
+    - [ ] 16.7 Extracting and saving responses
+    - [ ] 16.8 Evaluating the fine-tuned LLM
+    - [ ] 16.9 Conclusions
+    - [ ] 16.10 Summary
+- [ ] 17. LoRA (Low rank adaption)
+    - [ ] 17.1 Implement low-rank matrices A and B
+    - [ ] 17.2 Add scaling factor alpha / r
+    - [ ] 17.3 Create a LoRA linear layer wrapper/helper
+    - [ ] 17.4 Freeze pretrained base weights
+    - [ ] 17.5 Integrate LoRA weights into forward pass and autograd
+- [ ] 18. PEFT (Parameter Efficient Fine Tuning)
+    - [ ] 18.1 Explore alternative PEFT methods (Prefix Tuning, Prompt Tuning)
+    - [ ] 18.2 Implement unified PEFT adapter manager
+    - [ ] 18.3 Verify parameter count efficiency (trainable vs. frozen)
+- [ ] 19. RLHF (Reinforcement Learning from Human Feedback)
+    - [ ] 19.1 Train/Load a Reward Model (RM) from preference data
+    - [ ] 19.2 Implement PPO (Proximal Policy Optimization) reinforcement learning loop
+    - [ ] 19.3 Implement KL divergence penalty against reference SFT model
+    - [ ] 19.4 Compare generation quality before and after RLHF alignment
+- [ ] 20. DPO (Direct Preference Optimization)
+    - [ ] 20.1 Prepare a preference dataset (chosen vs. rejected responses)
+    - [ ] 20.2 Implement the DPO loss function from scratch
+    - [ ] 20.3 Fine-tune the policy model relative to a reference model
+
+### 4. Reasoning & System 2 Thinking
+- [ ] 21. Reasoning Models (Chain of Thought & RL/Search)
+    - [ ] 21.1 Implement training dataset parsing with thinking/reasoning tags
+    - [ ] 21.2 Implement search-based decoding (e.g., MCTS or Beam Search over reasoning steps)
+    - [ ] 21.3 Implement Process-supervised Reward Model (PRM)/value network scoring
+    - [ ] 21.4 Implement Group Relative Policy Optimization (GRPO) or similar RL loop for reasoning stability
+
+### 5. Efficiency & Optimization
+- [ ] 22. FlashAttention (Memory-Efficient Attention)
+    - [ ] 22.1 Implement online softmax tiling for forward attention pass
+    - [ ] 22.2 Avoid materializing the full N x N matrix in memory
+    - [ ] 22.3 Compare memory usage and speed against standard attention
+- [ ] 23. Speculative Decoding
+    - [ ] 23.1 Implement draft model and target model generation loops
+    - [ ] 23.2 Implement speculative draft verification logic
+    - [ ] 23.3 Benchmark generation speedup ratios
+- [ ] 24. Custom Quantization (RTN / GPTQ / AWQ)
+    - [ ] 24.1 Implement Round-to-Nearest (RTN) weight quantization
+    - [ ] 24.2 Create quantized linear layer forward implementations (e.g., 4-bit / 8-bit)
+    - [ ] 24.3 Compare accuracy loss and memory usage profiles
+
+### 6. Vision, Generative & Other Domains
+- [ ] 25. VIT (Vision Transformers)
+    - [ ] 25.1 Implement patch projection (convert 2D images to 1D patch embeddings)
+    - [ ] 25.2 Add CLS class token and positional embeddings
+    - [ ] 25.3 Implement ViT encoder blocks with self-attention
+    - [ ] 25.4 Create classification head for vision tasks
+    - [ ] 25.5 Train and evaluate on toy dataset (e.g., MNIST/CIFAR-10)
+- [ ] 26. VAE (Variational Auto Encoder)
+    - [ ] 26.1 Implement Encoder network (outputting mean and log variance)
+    - [ ] 26.2 Implement Reparameterization trick (sampling epsilon from N(0, I))
+    - [ ] 26.3 Implement Decoder network (reconstruct input from latent space)
+    - [ ] 26.4 Implement loss function (Reconstruction Loss + KL Divergence)
+    - [ ] 26.5 Train and generate synthetic images
+- [ ] 27. GANs (Generative Adversarial Networks)
+    - [ ] 27.1 Implement Generator network
+    - [ ] 27.2 Implement Discriminator network
+    - [ ] 27.3 Implement adversarial minimax training loop
+    - [ ] 27.4 Implement training stabilizers (e.g., Wasserstein GAN, Gradient Penalty)
+    - [ ] 27.5 Generate images and plot loss/discriminator accuracy
+- [ ] 28. Diffusion Models (Stable Diffusion)
+    - [ ] 28.1 Implement forward diffusion process (noise scheduler)
+    - [ ] 28.2 Implement reverse diffusion denoising process
+    - [ ] 28.3 Implement U-Net architecture with cross-attention
+    - [ ] 28.4 Train a simple DDPM model on 2D coordinates/shapes
+    - [ ] 28.5 Integrate classifier-free guidance
+
+### 7. Testing & Validation
+- [ ] 29. Unit test coverage for core math and data flow
+    - [ ] 29.1 Test stable softmax and cross-entropy against known values
+    - [ ] 29.2 Test DataLoader input/target window alignment
+    - [ ] 29.3 Test tokenizer encode/decode round-trips
+    - [ ] 29.4 Test sampling behavior for greedy, top-k, and top-p
+- [ ] 30. Model and training smoke tests
+    - [ ] 30.1 Test GPT forward output shape `[seq_len][vocab_size]`
+    - [ ] 30.2 Test backward pass creates gradients for trainable weights
+    - [ ] 30.3 Test one optimizer step updates parameters
+    - [ ] 30.4 Test JSON and binary weight save/load round-trips
+- [ ] 31. Candle/GPT-2 integration validation
+    - [ ] 31.1 Test GPT-2 config and tokenizer loading
+    - [ ] 31.2 Test safetensors tensor-name lookup
+    - [ ] 31.3 Test one GPT-2 forward pass with loaded weights
+    - [ ] 31.4 Test generation smoke output from `gpt2_candle`
+
+
+
+
 
 ## Next Step
 

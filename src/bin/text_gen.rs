@@ -18,14 +18,13 @@ pub fn main() {
     println!("Training BPE tokenizer (vocab size: {})...", vocab_size);
     tokenizer.train(&text, vocab_size, None);
 
-    // Initialize the exact GPT architecture matching train.rs
     let mut gpt = GPT::new(
-        vocab_size, // 1000
-        16,         // d_model
-        8,          // max_seq_len
-        2,          // num_heads
-        32,         // d_ff
-        2,          // num_blocks
+        vocab_size,
+        16, // d_model
+        8,   // max_seq_len
+        2,  // num_heads
+        32,// d_ff
+        2,  // num_blocks
     );
 
     // Dynamic weight loading check

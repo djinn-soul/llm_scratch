@@ -4,6 +4,6 @@ pub mod loss;
 pub mod lr_scheduler;
 pub mod optimizers;
 pub mod param;
+pub mod sampling;
 pub mod serilization;
 pub mod util;
-pub mod sampling;
