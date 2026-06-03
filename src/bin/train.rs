@@ -38,6 +38,10 @@ pub fn calc_loss_loader(gpt: &mut GPT, data_loader: &DataLoader, num_batches: us
 }
 
 fn main() {
+    // ── PHASE 1: DATASET + LOCAL BPE TOKENIZER ────────────────────────────
+    // This manual-training path learns from a small slice of "The Verdict".
+    // The tokenizer is trained locally so vocab size stays tiny and matches the
+    // miniature GPT model below.
     let url = "https://raw.githubusercontent.com/rasbt/LLMs-from-scratch/main/ch02/01_main-chapter-code/the-verdict.txt";
     let _ = download_file_if_not_present(url, "./the-verdict.txt");
 
@@ -49,7 +53,10 @@ fn main() {
     tokenizer.train(&text, vocab_size, None);
     println!("Tokenizer trained! Vocab size: {}\n", tokenizer.vocab.len());
 
-    // 3. Define target training corpus to memorize (sliding window from the book!)
+    // ── PHASE 2: TARGET CORPUS + SEQUENTIAL SPLIT ─────────────────────────
+    // Select one contiguous slice so the model can overfit a visible phrase.
+    // The validation split is also sequential; no shuffling is used in this
+    // learning example.
     let start_phrase = "It was not till three years later";
     let start_pos = text
         .find(start_phrase)
@@ -76,7 +83,11 @@ fn main() {
         val_tokens.len()
     );
 
-    // 4. Initialize modular DataLoader (max_length = 8, stride = 1)
+    // ── PHASE 3: SLIDING-WINDOW DATALOADERS ───────────────────────────────
+    // Each sample is:
+    //   input  = 8-token context
+    //   target = same window shifted left by one next token
+    // stride=1 gives the densest possible set of training examples.
     let max_seq_len = 8; // Context window size
     let stride = 1; // Step 1 token at a time
     let train_loader = DataLoader::new(train_tokens, max_seq_len, stride);
@@ -86,7 +97,9 @@ fn main() {
         train_loader.len()
     );
 
-    // 5. Initialize an official GPT-2 Small (124M) configuration GPT model
+    // ── PHASE 4: MINI MANUAL GPT + OPTIMIZER ──────────────────────────────
+    // This is not official GPT-2 Small. It is a tiny GPT-shaped model using the
+    // repo's hand-written forward/backward implementations.
     let d_model = 16;
     let max_seq_len = 8; // Context window size
     let num_heads = 2;
@@ -125,8 +138,10 @@ fn main() {
         "Initialized mini-GPT and AdamW optimizer (lr = {:.0e}, wd = {}).\n",
         learning_rate, weight_decay
     );
-    // Let's print initial loss before training using the first batch
-    // Replace lines 119-126 in train.rs:
+
+    // ── PHASE 5: BASELINE LOSS BEFORE ANY PARAMETER UPDATE ────────────────
+    // This makes it easy to verify training later: loss after training should
+    // move down on the training split even if validation overfits.
     let initial_train_loss = calc_loss_loader(&mut gpt, &train_loader, 10);
     let initial_val_loss = calc_loss_loader(&mut gpt, &val_loader, 10);
     println!(
@@ -134,7 +149,13 @@ fn main() {
         initial_train_loss, initial_val_loss
     );
 
-    // 7. Training Loop using our manual backpropagation and DataLoader
+    // ── PHASE 6: MANUAL BACKPROPAGATION TRAINING LOOP ─────────────────────
+    // Per batch:
+    //   1. zero accumulated gradients from the previous step
+    //   2. forward pass: token ids -> logits
+    //   3. loss backward: logits -> d_logits
+    //   4. GPT backward: route gradients through every layer
+    //   5. AdamW step: mutate parameters using accumulated gradients
     let mut global_step = 0; // <--- Track global steps across epochs
 
     let start_time = Instant::now();
@@ -191,7 +212,9 @@ fn main() {
             io::stdout().flush().unwrap();
         }
     }
-    // 8. Save Model Weights (Auto-detecting JSON and Binary based on file extension!)
+
+    // ── PHASE 7: SAVE WEIGHTS ─────────────────────────────────────────────
+    // The serialization trait chooses JSON or binary format from the extension.
     println!("\n[4/5] Saving model weights to disk...");
     gpt.save_weights("model_weights.json")
         .expect("Failed to save JSON weights");
@@ -199,7 +222,10 @@ fn main() {
         .expect("Failed to save binary weights");
     println!("  ✅ Weights successfully saved to 'model_weights.json' and 'model_weights.bin'!");
 
-    // 9. Load weights back and run Autoregressive Generation!
+    // ── PHASE 8: RELOAD + AUTOREGRESSIVE GENERATION ───────────────────────
+    // Reloading before generation proves the saved binary weights are usable.
+    // Generation then loops one token at a time, feeding each prediction back
+    // into the next context window.
     println!("\n[5/5] Testing generation with the reloaded model...");
 
     // Prompt the model with a starting sequence

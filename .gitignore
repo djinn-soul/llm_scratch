@@ -25,3 +25,5 @@ rustc-ice-*.txt
 target/
 .serena
 *.exe
+*.bin
+*.safetensors

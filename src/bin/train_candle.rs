@@ -14,6 +14,14 @@ fn calc_loss_loader(
     device: &Device,
     num_batches: usize,
 ) -> Result<f32> {
+    // Evaluation helper:
+    //   1. take a few sliding-window batches from DataLoader
+    //   2. move token ids into Candle tensors
+    //   3. run the model forward
+    //   4. average cross-entropy loss
+    //
+    // No optimizer step happens here, so this is safe to call before training
+    // and between epochs to see whether the model is actually learning.
     let mut total_loss = 0.0;
     let mut count = 0;
     for (inputs, targets) in loader.iter() {
@@ -43,18 +51,25 @@ fn calc_loss_loader(
 }
 
 pub fn main() -> Result<()> {
-    // Device
+    // ── PHASE 1: CANDLE DEVICE + TRAINABLE PARAMETER STORE ────────────────
+    // `Device::Cpu` keeps the example portable. `VarMap` owns trainable tensors;
+    // `VarBuilder` gives model constructors named access into that map.
     let device = Device::Cpu;
     let mut varmap = VarMap::new();
 
     // Create a VarBuilder that registers all weights inside varmap
     let vs = VarBuilder::from_varmap(&varmap, DType::F32, &device);
 
-    // Config
+    // ── PHASE 2: MINI GPT-2 MODEL ─────────────────────────────────────────
+    // Same GPT-2 decoder architecture as the checkpoint loader, but tiny:
+    // vocab=1000, context=8, width=16, heads=2, blocks=2.
     let cfg = Gpt2Config::gpt2_mini(); // Miniature GPT-2 configuration
     let model = Gpt2Model::load(vs, &cfg)?;
     let max_lr = 3e-4;
 
+    // AdamW in Candle owns the update rule. Unlike the manual optimizer path in
+    // `src/bin/train.rs`, Candle's optimizer reads gradients from tensors that
+    // autograd created during `backward_step`.
     let params = ParamsAdamW {
         lr: max_lr,
         weight_decay: 0.01,
@@ -62,7 +77,10 @@ pub fn main() -> Result<()> {
     };
     // Extract all trainable tensors from the VarMap
     let mut optimizer = AdamW::new(varmap.all_vars(), params)?;
-    // 1. Download and read the dataset
+
+    // ── PHASE 3: DATASET + LOCAL BPE TOKENIZER ────────────────────────────
+    // Keep this comparable to the manual training binary:
+    // both learn from the same `the-verdict.txt` slice and use a 1000-token BPE.
     let url = "https://raw.githubusercontent.com/rasbt/LLMs-from-scratch/main/ch02/01_main-chapter-code/the-verdict.txt";
     let _ = download_file_if_not_present(url, "./the-verdict.txt");
     let text = std::fs::read_to_string("./the-verdict.txt").expect("Failed to read file");
@@ -89,7 +107,9 @@ pub fn main() -> Result<()> {
     let train_loader = DataLoader::new(train_tokens, max_seq_len, stride);
     let val_loader = DataLoader::new(val_tokens, max_seq_len, stride);
 
-    // 6. Set up the learning rate scheduler (Cosine Warmup over 80 epochs)
+    // ── PHASE 4: LEARNING RATE SCHEDULE ───────────────────────────────────
+    // Warm up for the first 10% of optimizer steps, then decay smoothly. This
+    // keeps early updates gentle while random weights are still unstable.
     let epochs = 100;
     let steps_per_epoch = train_loader.len();
     let total_steps = epochs * steps_per_epoch;
@@ -108,7 +128,14 @@ pub fn main() -> Result<()> {
         "Initial Loss before training -> Train: {:.6}, Val: {:.6}",
         initial_train_loss, initial_val_loss
     );
-    // 8. Start the training loop
+
+    // ── PHASE 5: TRAIN WITH CANDLE AUTOGRAD ───────────────────────────────
+    // Per batch:
+    //   1. scheduler chooses the current learning rate
+    //   2. token id Vecs become Candle tensors
+    //   3. forward pass produces [seq_len, vocab_size] logits
+    //   4. cross_entropy compares each row with the target next-token id
+    //   5. backward_step computes gradients and updates all VarMap weights
     let mut global_step = 0;
     let start_time = std::time::Instant::now();
     println!("\nStarting training loop using Candle autograd...");
@@ -156,14 +183,22 @@ pub fn main() -> Result<()> {
         }
     }
     println!("\nTraining completed in {:.2?}!", start_time.elapsed());
-    // 9. Save trained Candle weights to disk
+
+    // ── PHASE 6: SAVE + RELOAD WEIGHTS ────────────────────────────────────
+    // Saving proves the trained `VarMap` can round-trip through safetensors.
+    // Reloading before generation verifies that the saved file, not only the
+    // in-memory model, contains the learned weights.
     println!("\nSaving trained Candle weights...");
     varmap.save("candle_model.safetensors")?;
     println!("  ✅ Weights successfully saved to 'candle_model.safetensors'!");
-    // 10. Load weights back and run Autoregressive Generation!
+
     println!("\nReloading weights from 'candle_model.safetensors' to test prediction...");
     varmap.load("candle_model.safetensors")?;
 
+    // ── PHASE 7: AUTOREGRESSIVE GENERATION ────────────────────────────────
+    // Generation feeds the model's own sampled token back into the next step.
+    // Because this mini config has only 8 positions, every step crops to the
+    // last 8 tokens before calling `model.forward`.
     let prompt_text = "if she had not dragged him down ";
     let prompt_tokens = tokenizer.encode(prompt_text.to_string(), None).unwrap();
     println!("  Prompt: \"{}\" -> {:?}", prompt_text, prompt_tokens);
@@ -183,6 +218,7 @@ pub fn main() -> Result<()> {
     std::io::Write::flush(&mut std::io::stdout())?;
 
     for _ in 0..12 {
+        // Keep only the context window the position embedding table can handle.
         let seq_len = input_tokens.len();
         let start_idx = if seq_len > cfg.n_positions {
             seq_len - cfg.n_positions
@@ -194,12 +230,12 @@ pub fn main() -> Result<()> {
         let inputs_t = Tensor::new(inputs_u32.as_slice(), &device)?;
         let logits = model.forward(&inputs_t)?;
 
-        // Get logits of the last token
+        // Only the final row predicts the next token after the current context.
         let seq_len = logits.dim(0)?;
         let last_logits = logits.narrow(0, seq_len - 1, 1)?.squeeze(0)?;
         let logits_vec = last_logits.to_vec1::<f32>()?;
 
-        // Greedy decoding (temperature = 0.0)
+        // Greedy decoding (temperature = 0.0) chooses the highest-logit token.
         let next_token = sample_next_token(&logits_vec, 0.0, None, None);
         input_tokens.push(next_token);
         generated_tokens.push(next_token);

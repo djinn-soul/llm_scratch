@@ -4,6 +4,18 @@ use crate::common::param::Param;
 use crate::common::util::add;
 use rand::RngExt;
 
+// TOKEN EMBEDDING
+//
+// Converts a discrete token id into a learned dense vector.
+//
+// Shape:
+//   weight[token_id][dim] = [vocab_size][d_model]
+//
+// Example:
+//   token id 42 -> copy row weight[42] -> [d_model] vector
+//
+// The forward pass is a table lookup, not a matrix multiply. The backward pass
+// is therefore a scatter-add back into the rows that were looked up.
 pub struct TokenEmbedding {
     weight: Param, //[vocab_size][d_model]
     // BACKWARD: gradient table mirrors `weight`.
@@ -13,6 +25,16 @@ pub struct TokenEmbedding {
     pub d_model: usize, // dimension of token embedding
 }
 
+// POSITIONAL EMBEDDING
+//
+// Converts an absolute position in the context window into a learned vector.
+//
+// Shape:
+//   weight[position][dim] = [max_seq_len][d_model]
+//
+// Token embeddings answer "what token is this?"
+// Positional embeddings answer "where is this token in the context?"
+// The model adds both vectors so each row contains identity + location.
 pub struct PositionalEmbedding {
     weight: Param, // [max_seq_len][d_model]
     // BACKWARD: gradient table mirrors `weight`.
@@ -24,6 +46,13 @@ pub struct PositionalEmbedding {
 
 impl TokenEmbedding {
     pub fn new(vocab_size: usize, d_model: usize) -> Self {
+        // Allocate one trainable vector per possible token id.
+        //
+        // For vocab_size=1000 and d_model=16:
+        //   weight shape = [1000][16]
+        //
+        // Param::new also creates a zero-filled gradient matrix with the same
+        // shape, so backward can accumulate into weight.grad.
         let mut rng = rand::rng();
         let weight_data = (0..vocab_size)
             .map(|_| (0..d_model).map(|_| rng.random_range(-1.0..1.0)).collect())
@@ -35,6 +64,12 @@ impl TokenEmbedding {
         }
     }
     pub fn forward(&self, ids: usize) -> Vec<f32> {
+        // Forward lookup:
+        //   input token id = ids
+        //   output vector  = weight[ids]
+        //
+        // The clone returns an owned vector so later layers can transform it
+        // without mutating the embedding table.
         self.weight.data[ids].clone()
     }
 
@@ -83,6 +118,15 @@ impl TokenEmbedding {
     }
 
     pub fn transposed_weight(&self) -> Vec<Vec<f32>> {
+        // GPT uses tied input/output embeddings:
+        //
+        //   token embedding table: [vocab_size][d_model]
+        //   LM head matrix:        [d_model][vocab_size]
+        //
+        // This helper builds weight^T so hidden states can be projected to
+        // vocabulary logits:
+        //   [seq_len][d_model] @ [d_model][vocab_size]
+        //     -> [seq_len][vocab_size]
         let mut transposed = vec![vec![0.0; self.vocab_size]; self.d_model];
 
         for token_id in 0..self.vocab_size {
@@ -99,6 +143,13 @@ impl TokenEmbedding {
 
 impl PositionalEmbedding {
     pub fn new(max_seq_len: usize, d_model: usize) -> Self {
+        // Allocate one trainable vector for every allowed absolute position.
+        //
+        // For max_seq_len=8 and d_model=16:
+        //   weight shape = [8][16]
+        //
+        // If a sequence is longer than max_seq_len, callers must crop or reject
+        // it before looking up positions.
         let mut rng = rand::rng();
         let weight_data = (0..max_seq_len)
             .map(|_| (0..d_model).map(|_| rng.random_range(-1.0..1.0)).collect())
@@ -110,6 +161,9 @@ impl PositionalEmbedding {
         }
     }
     pub fn forward(&self, ids: usize) -> Vec<f32> {
+        // Forward lookup:
+        //   ids is the absolute position: 0, 1, 2, ...
+        //   output is the learned position vector for that slot.
         self.weight.data[ids].clone()
     }
 
@@ -134,6 +188,22 @@ pub fn embed_sequence(
     token_embedding: &TokenEmbedding,
     positional_embedding: &PositionalEmbedding,
 ) -> Vec<Vec<f32>> {
+    // Build the full input matrix for the transformer.
+    //
+    // For each sequence position:
+    //   token_vec = token_embedding[token_id]
+    //   pos_vec   = positional_embedding[position]
+    //   output    = token_vec + pos_vec
+    //
+    // Example:
+    //   ids = [42, 17, 42]
+    //
+    //   row 0 = token_emb[42] + pos_emb[0]
+    //   row 1 = token_emb[17] + pos_emb[1]
+    //   row 2 = token_emb[42] + pos_emb[2]
+    //
+    // Repeated token 42 gets the same token vector both times, but different
+    // position vectors because the occurrences are in different slots.
     ids.iter()
         .enumerate()
         .map(|(position, &id)| {
