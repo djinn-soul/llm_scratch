@@ -86,7 +86,7 @@ fn main() {
         train_loader.len()
     );
 
-    // 5. Initialize a miniature GPT model
+    // 5. Initialize an official GPT-2 Small (124M) configuration GPT model
     let d_model = 16;
     let max_seq_len = 8; // Context window size
     let num_heads = 2;

@@ -19,11 +19,10 @@ pub fn main() {
     tokenizer.train(&text, vocab_size, None);
 
     let mut gpt = GPT::new(
-        vocab_size,
-        16, // d_model
-        8,   // max_seq_len
+        vocab_size, 16, // d_model
+        8,  // max_seq_len
         2,  // num_heads
-        32,// d_ff
+        32, // d_ff
         2,  // num_blocks
     );
 
