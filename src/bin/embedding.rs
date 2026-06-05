@@ -9,7 +9,7 @@ fn main() {
     let pos = PositionalEmbedding::new(max_seq_len, d_model);
 
     let ids = vec![45usize, 12, 300, 7];
-    let embedded = embed_sequence(&ids, &tok, &pos);
+    let embedded = embed_sequence(&ids, &tok, &pos, 0);
 
     println!("Sequence length: {}", embedded.len()); // 4
     println!("Embedding dim:   {}", embedded[0].len()); // 64

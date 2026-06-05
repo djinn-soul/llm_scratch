@@ -18,6 +18,82 @@
 // is math-correct but produces meaningless output until back-propagation is added.
 // https://sebastianraschka.com/blog/2023/self-attention-from-scratch.html
 // https://machinelearningmastery.com/the-attention-mechanism-from-scratch/
+
+// KV-CACHE
+// During generation, the prompt is processed once and every attention head saves
+// the prompt's K and V rows. Later steps pass only the new token into forward().
+// That new token still builds its own Q/K/V, but the new K/V rows are appended
+// to the saved past K/V matrix before scoring:
+//
+//   prompt pass:    Q,K,V all have shape [prompt_len][d_k or d_v]
+//   next-token pass Q has shape [1][d_k]
+//                   K,V become [past_len + 1][d_k or d_v]
+//   scores = Q @ K^T becomes [1][past_len + 1]
+//
+// So the expensive old token projections are reused, while the new token can
+// still attend over the full visible history.
+//
+// Tiny row-level example with d_k = d_v = 2:
+//
+//   After the prompt "A B C D", the cache holds old keys and values:
+//
+//     past_k = [
+//       k0 = [0.10, 0.20],   // token A
+//       k1 = [0.30, 0.40],   // token B
+//       k2 = [0.50, 0.60],   // token C
+//       k3 = [0.70, 0.80],   // token D
+//     ]
+//
+//     past_v = [
+//       v0 = [1.00, 1.10],
+//       v1 = [1.20, 1.30],
+//       v2 = [1.40, 1.50],
+//       v3 = [1.60, 1.70],
+//     ]
+//
+//   Now generation sends only the new token "E":
+//
+//     x_new = [[...d_model values for E...]]
+//     q_new = [[q4a, q4b]]     // shape [1][2]
+//     k_new = [[k4a, k4b]]     // shape [1][2]
+//     v_new = [[v4a, v4b]]     // shape [1][2]
+//
+//   The cache append builds full K/V for the visible history:
+//
+//     full_k = [k0, k1, k2, k3, k4]    // shape [5][2]
+//     full_v = [v0, v1, v2, v3, v4]    // shape [5][2]
+//
+//   Then scoring uses the one new query against all visible keys:
+//
+//     full_k^T = [
+//       [k0a, k1a, k2a, k3a, k4a],
+//       [k0b, k1b, k2b, k3b, k4b],
+//     ]                                // shape [2][5]
+//
+//     scores = q_new @ full_k^T
+//            = [[
+//                q4 dot k0,
+//                q4 dot k1,
+//                q4 dot k2,
+//                q4 dot k3,
+//                q4 dot k4,
+//              ]]                      // shape [1][5]
+//
+//   After softmax, weights also have shape [1][5]:
+//
+//     attention_weights = [[w0, w1, w2, w3, w4]]
+//
+//   The final blend reads every cached value row:
+//
+//     output =
+//       w0*v0 + w1*v1 + w2*v2 + w3*v3 + w4*v4
+//     output shape = [1][2]
+//
+// That is the whole cache idea: compute only q4/k4/v4 now, but still use
+// k0..k4 and v0..v4 as if the full sequence had been sent again.
+// https://medium.com/@joaolages/kv-caching-explained-276520203249
+// https://developer.nvidia.com/blog/mastering-llm-techniques-inference-optimization/
+
 // ════════════════════════════════════════════════════════════════════════════
 
 use crate::common::activation::softmax;
@@ -43,6 +119,12 @@ pub struct SelfAttention {
     cache_k: Vec<Vec<f32>>,
     cache_v: Vec<Vec<f32>>,
     cache_attention_weights: Vec<Vec<f32>>,
+    // --- KV CACHE FOR INFERENCE ---
+    // cache_kv stores the full historical key/value tables for this attention
+    // head. It is inference-only state: training/backward still uses the normal
+    // per-forward caches above.
+    pub use_cache: bool,
+    pub cache_kv: Option<(Vec<Vec<f32>>, Vec<Vec<f32>>)>, // (cached_K, cached_V)
 }
 
 impl SelfAttention {
@@ -61,6 +143,8 @@ impl SelfAttention {
             cache_k: Vec::new(),
             cache_v: Vec::new(),
             cache_attention_weights: Vec::new(),
+            use_cache: false,
+            cache_kv: None,
         }
     }
 
@@ -74,16 +158,80 @@ impl SelfAttention {
         //   k[i] = "what does token i offer?"
         //   v[i] = "what does token i actually carry?"
         let q = matmul(&x.to_vec(), &self.w_q.data);
-        let k = matmul(&x.to_vec(), &self.w_k.data);
-        let v = matmul(&x.to_vec(), &self.w_v.data);
+        let mut k = matmul(&x.to_vec(), &self.w_k.data);
+        let mut v = matmul(&x.to_vec(), &self.w_v.data);
+
+        // ── KV-CACHE APPEND ────────────────────────────────────────────────
+        // Non-cached attention receives the whole sequence every time:
+        //   x [seq_len][d_model]
+        //   q,k,v [seq_len][d_k or d_v]
+        //
+        // Cached generation is different after the prompt pass:
+        //   x      [1][d_model]       only the newest token row
+        //   q      [1][d_k]           only the newest query is needed
+        //   k,v    [1][d_k or d_v]    newest key/value rows
+        //   past_k [past_len][d_k]    saved from earlier forward calls
+        //   past_v [past_len][d_v]
+        //
+        // We append the new k/v rows to the saved tables so the current query
+        // can score against every previous token plus itself.
+        //
+        // Matrix picture when past_len = 4 and current_len = 1:
+        //
+        //   before append:
+        //     past_k = [k0, k1, k2, k3]      [4][d_k]
+        //     k      = [k4]                  [1][d_k]
+        //
+        //   after append:
+        //     k      = [k0, k1, k2, k3, k4]  [5][d_k]
+        //
+        // Same for V:
+        //     v      = [v0, v1, v2, v3, v4]  [5][d_v]
+        //
+        // Q is NOT appended here:
+        //     q      = [q4]                  [1][d_k]
+        //
+        // Reason: old tokens do not need new outputs during generation. We
+        // only need the newest token's output row, so only the newest query is
+        // required. Old keys/values are enough to let it read history.
+        let mut pos_offset = 0;
+        if self.use_cache {
+            if let Some((ref past_k, ref past_v)) = self.cache_kv {
+                pos_offset = past_k.len();
+
+                // full_k shape: [past_len + current_len][d_k]
+                // current_len is usually 1 during token-by-token generation.
+                let mut full_k = past_k.clone();
+                full_k.extend(k);
+                k = full_k;
+
+                // full_v shape: [past_len + current_len][d_v]
+                // Values must grow with keys because attention_weights @ V
+                // needs one value row for every key column in the score grid.
+                let mut full_v = past_v.clone();
+                full_v.extend(v);
+                v = full_v;
+            }
+            // Store the merged table for the next generation step. After this:
+            //   cache_kv.0.len() == cache_kv.1.len() == total visible tokens.
+            self.cache_kv = Some((k.clone(), v.clone()));
+        }
 
         self.cache_q = q.clone();
         self.cache_k = k.clone();
         self.cache_v = v.clone();
         // ── STEP 2: SCORE ───────────────────────────────────────────────────
         // Attention = softmax(Q @ K^T / sqrt(d_k)) @ V
-        // Transpose K so columns become keys, then Q @ K^T gives a
-        // [seq_len][seq_len] grid: scores[i][j] = how much query i matches key j.
+        // Transpose K so columns become keys, then Q @ K^T gives a score grid.
+        //
+        // Without cache:
+        //   Q [seq_len][d_k] @ K^T [d_k][seq_len] -> scores [seq_len][seq_len]
+        //
+        // With cache during generation:
+        //   Q [1][d_k] @ K^T [d_k][past_len + 1]
+        //     -> scores [1][past_len + 1]
+        //
+        // scores[i][j] = how much current query row i matches visible key row j.
         let k_t = mat_transpose(&k);
         let scores: Vec<Vec<f32>> = matmul(&q, &k_t);
 
@@ -107,9 +255,22 @@ impl SelfAttention {
         //   query2  ok   ok   ok  -inf
         //   query3  ok   ok   ok   ok
         //
-        // i = query row, j = key column. Inner loop starts at i+1 = first future key.
+        // i = query row, j = key column.
+        //
+        // With cache, i is local to the current call, but j is in the full
+        // cached timeline. Example after 4 cached tokens and 1 new token:
+        //   local i = 0, query_pos = 4
+        //   keys visible at j = 0..4
+        //   keys future at j > 4
+        //
+        // The offset keeps the causal mask aligned to absolute sequence
+        // positions instead of mistakenly treating the new token as position 0.
         for i in 0..scaled_scores.len() {
-            for j in (i + 1)..scaled_scores[0].len() {
+            let query_pos = pos_offset + i;
+
+            // A key is in the future if its sequence position j is ahead of
+            // this query's absolute position.
+            for j in (query_pos + 1)..scaled_scores[0].len() {
                 scaled_scores[i][j] = -f32::INFINITY;
             }
         }
@@ -125,7 +286,15 @@ impl SelfAttention {
 
         // ── STEP 5: BLEND ───────────────────────────────────────────────────
         // weighted sum of values = attention_weights @ V
-        // output[i] = Σ_j attention_weights[i][j] * v[j]
+        // output[i] = sum_j attention_weights[i][j] * v[j]
+        //
+        // Cached generation shape:
+        //   attention_weights [1][past_len + 1]
+        //   V                 [past_len + 1][d_v]
+        //   output            [1][d_v]
+        //
+        // This single output row is the new token's context-aware vector, built
+        // from all cached previous values plus the current value.
         matmul(&attention_weights, &v)
     }
 

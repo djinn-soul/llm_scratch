@@ -55,6 +55,12 @@ impl Transformer {
             ff: FeedForward::new(w1, w2, d_model, d_ff),
         }
     }
+    pub fn set_use_cache(&mut self, use_cache: bool) {
+        self.mha.set_use_cache(use_cache);
+    }
+    pub fn clear_cache(&mut self) {
+        self.mha.clear_cache();
+    }
 
     pub fn forward(&mut self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
         // ── STEP 1: NORMALIZE BEFORE ATTENTION ──────────────────────────────

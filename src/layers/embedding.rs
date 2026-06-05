@@ -187,6 +187,7 @@ pub fn embed_sequence(
     ids: &[usize],
     token_embedding: &TokenEmbedding,
     positional_embedding: &PositionalEmbedding,
+    pos_offset: usize,
 ) -> Vec<Vec<f32>> {
     // Build the full input matrix for the transformer.
     //
@@ -204,12 +205,20 @@ pub fn embed_sequence(
     //
     // Repeated token 42 gets the same token vector both times, but different
     // position vectors because the occurrences are in different slots.
+    //
+    // KV-cache use:
+    //   During cached generation this function may receive only the newest
+    //   token id, but that token still needs its absolute position. If 4 tokens
+    //   are already cached, pos_offset = 4, so local row 0 uses pos_emb[4].
+    //
+    //   ids = [next_token], pos_offset = 4
+    //   row 0 = token_emb[next_token] + pos_emb[4]
     ids.iter()
         .enumerate()
         .map(|(position, &id)| {
             add(
                 &token_embedding.forward(id),
-                &positional_embedding.forward(position),
+                &positional_embedding.forward(position + pos_offset),
             )
         })
         .collect()

@@ -46,6 +46,12 @@ pub struct GPT {
     pub position_emb: PositionalEmbedding,
     pub blocks: Vec<Transformer>,
     pub norm: LayerNorm,
+    // Inference switch for token-by-token generation.
+    //
+    // false: every forward() call recomputes attention over all input tokens.
+    // true:  the prompt pass stores K/V inside every attention head, and later
+    //        calls can pass only the newest token while reusing past K/V.
+    pub use_kv_cache: bool,
 
     // ── Activations saved during forward(), used by backward() ──
     // BACKWARD: these caches preserve the forward pass context so gradients
@@ -87,10 +93,23 @@ impl GPT {
             position_emb,
             blocks,
             norm,
+            use_kv_cache: false,
             cache_blocks: Vec::new(),
             cache_embed: Vec::new(),
             cache_norm: Vec::new(),
             cache_tokens: Vec::new(),
+        }
+    }
+
+    pub fn set_use_cache(&mut self, use_cache: bool) {
+        self.use_kv_cache = use_cache;
+        for block in &mut self.blocks {
+            block.set_use_cache(use_cache);
+        }
+    }
+    pub fn clear_cache(&mut self) {
+        for block in &mut self.blocks {
+            block.clear_cache();
         }
     }
     pub fn forward(&mut self, tokens: &[usize]) -> Vec<Vec<f32>> {
@@ -102,9 +121,41 @@ impl GPT {
         // receive gradients during the final scatter step.
         self.cache_tokens = tokens.to_vec();
 
+        // Retrieve position offset from the first block's cached keys if active.
+        //
+        // When generation feeds only one new token, that token is local row 0
+        // in this call, but it is not absolute position 0 in the sequence. If
+        // four tokens are already cached, the next token must use position 4:
+        //
+        //   cached K rows: [token0, token1, token2, token3]
+        //   incoming ids: [next_token]
+        //   pos_offset:   4
+        //   embed row:    token_emb[next_token] + pos_emb[4]
+        //
+        // We read the first head's cached K length because every block/head is
+        // advanced together during generation.
+        let pos_offset = if self.use_kv_cache {
+            self.blocks[0].mha.heads[0]
+                .cache_kv
+                .as_ref()
+                .map(|(k, _)| k.len())
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
         // ── STEP 1: EMBED TOKEN IDS ─────────────────────────────────────────
         // Combine token identity with absolute position information.
-        let mut x = embed_sequence(tokens, &self.token_emb, &self.position_emb);
+        //
+        // Without KV cache:
+        //   tokens [seq_len] -> x [seq_len][d_model], positions start at 0.
+        //
+        // With KV cache after the prompt:
+        //   tokens [1] -> x [1][d_model], position starts at cached length.
+        //
+        // That keeps the new row's positional embedding aligned with the full
+        // sequence even though we did not resend the old token ids.
+        let mut x = embed_sequence(tokens, &self.token_emb, &self.position_emb, pos_offset);
         self.cache_embed = x.clone();
 
         // ── STEP 2: RUN THE DECODER STACK ───────────────────────────────────
@@ -210,6 +261,39 @@ impl GPT {
     ) -> Vec<usize> {
         let mut tokens = context.to_vec();
         let max_seq_len = self.position_emb.max_seq_len;
+        // 1. Turn on and clean the cache.
+        //
+        // Generation needs persistent K/V state across forward() calls. Start
+        // from an empty cache so this prompt does not mix with any previous
+        // prompt or earlier generation run.
+        self.set_use_cache(true);
+        self.clear_cache();
+
+        // Crop prompt context to max_seq_len if it is too long. Positional
+        // embeddings only exist for positions 0..max_seq_len-1, so an
+        // overlong prompt must be reduced before the first cached pass.
+        let start_idx = if tokens.len() > max_seq_len {
+            tokens.len() - max_seq_len
+        } else {
+            0
+        };
+        let initial_context = &tokens[start_idx..];
+
+        // 2. First pass: process the full prompt context at once.
+        //
+        // This call fills every attention head's cache:
+        //   prompt tokens [prompt_len]
+        //   embeddings    [prompt_len][d_model]
+        //   cached K/V    [prompt_len][d_k or d_v]
+        //   logits        [prompt_len][vocab_size]
+        //
+        // We use only the last logits row for the first generated token, but
+        // the earlier rows are still useful because they created the cache.
+        let logits = self.forward(initial_context);
+        let last_logits = logits.last().unwrap().clone();
+        let mut next_token = sample_next_token(&last_logits, temperature, top_k, top_p);
+        tokens.push(next_token);
+
         for _ in 0..max_new_tokens {
             // ── STEP 1: CROP TO THE MODEL'S CONTEXT WINDOW ─────────────────
             let start_idx = if tokens.len() > max_seq_len {
@@ -217,15 +301,40 @@ impl GPT {
             } else {
                 0
             };
-            let cropped_tokens = &tokens[start_idx..];
-            // ── STEP 2: SCORE THE CURRENT CONTEXT ──────────────────────────
-            let logits = self.forward(&cropped_tokens);
-            // ── STEP 3: USE THE LAST POSITION FOR NEXT-TOKEN PREDICTION ────
-            let last_logits = logits.last().unwrap();
-            // ── STEP 4: ADVANCED DECODING AND SAMPLING ─────────────────────
-            let next_token = sample_next_token(last_logits, temperature, top_k, top_p);
+
+            let last_logits = if start_idx > 0 {
+                // If the context window shifted, cached K/V rows no longer
+                // match the cropped token window. Clear and rebuild from the
+                // current window so positions and visible history stay aligned.
+                self.clear_cache();
+                let cropped_tokens = &tokens[start_idx..];
+                let logits = self.forward(cropped_tokens);
+                logits.last().unwrap().clone()
+            } else {
+                // Normal cached step: feed only the newly generated token.
+                //
+                // The old non-cached loop would resend the whole growing
+                // sequence:
+                //   [prompt..., token_a, token_b, ...]
+                //
+                // With KV cache, old tokens already have saved K/V rows, so
+                // this call sends only:
+                //   [next_token]
+                //
+                // Attention then scores this one query against cached old keys
+                // plus the new key, producing one logits row for the next
+                // sampling decision.
+                let logits = self.forward(&[next_token]);
+                logits.last().unwrap().clone()
+            };
+
+            // ── STEP 2: ADVANCED DECODING AND SAMPLING ─────────────────────
+            next_token = sample_next_token(&last_logits, temperature, top_k, top_p);
             tokens.push(next_token);
         }
+        // 4. Reset cache states when done
+        self.set_use_cache(false);
+        self.clear_cache();
         tokens
     }
     /// Standard autoregressive text generation using Greedy Decoding (backwards compatible)

@@ -50,6 +50,7 @@ use crate::common::activation::softmax;
 ///      - Index 4 (E): cumulative = 0.982 + 0.018 = 1.0. (0.99 < 1.00, TRIGGER!)
 /// 3. Return Selected Index: 4 (Token E).
 /// ```
+/// https://huggingface.co/docs/transformers/main/en/generation_strategies#kv-caching
 pub fn sample_next_token(
     logits: &[f32],       // raw output from the Transformer head (no softmax yet)
     temperature: f32,     // controls randomness (0 = deterministic, >0 = stochastic)

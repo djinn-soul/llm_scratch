@@ -68,6 +68,16 @@ impl MultiHeadAttention {
         }
     }
 
+    pub fn set_use_cache(&mut self, use_cache: bool) {
+        for head in &mut self.heads {
+            head.use_cache = use_cache;
+        }
+    }
+    pub fn clear_cache(&mut self) {
+        for head in &mut self.heads {
+            head.cache_kv = None;
+        }
+    }
     // Forward pass: x = [seq_len][d_model] → output [seq_len][d_model]
     // Output width matches input width, so multi-head layers can be stacked.
     pub fn forward(&mut self, x: &[Vec<f32>]) -> Vec<Vec<f32>> {
