@@ -48,6 +48,17 @@ fn main() -> Result<()> {
     //   2. run the model and keep only the last-position logits
     //   3. sample one token
     //   4. append and print that token, then repeat
+    //
+    // This demo uses the simple full-context path: every loop sends the whole
+    // visible context back through the model. For example, if the prompt has 6
+    // tokens and we have generated 2 more:
+    //
+    //   context_tokens = [t0, t1, t2, t3, t4, t5, t6, t7]
+    //   model.forward(context_tokens) returns logits with 8 rows
+    //   logits row 7 predicts the next token t8
+    //
+    // KV-cache generation would send only [t7] after the cache is primed, but
+    // this binary keeps the full matrix path easy to inspect.
     for _ in 0..30 {
         let seq_len = input_tokens.len();
         let start_idx = if seq_len > cfg.n_positions {
@@ -61,12 +72,22 @@ fn main() -> Result<()> {
 
         // The model returns one vocab distribution per input position. The last
         // row is the prediction for the next token after the full context.
+        //
+        // Matrix shape:
+        //   logits [context_len, vocab_size]
+        //
+        // Only the last row is sampled because earlier rows predict tokens that
+        // are already inside the context.
         let seq_len = logits.dim(0)?;
         let last_logits = logits.narrow(0, seq_len - 1, 1)?.squeeze(0)?;
         let logits_vec = last_logits.to_vec1::<f32>()?;
 
         // Sample using temperature=0.8, top_k=50, top_p=0.95. This is less
         // deterministic than greedy decoding but avoids extremely unlikely ids.
+        //
+        // `logits_vec` is one score per vocabulary id. The sampler changes
+        // those raw scores into a filtered probability distribution and returns
+        // one chosen token id.
         let next_token = sample_next_token(&logits_vec, 0.8, Some(50), Some(0.95)) as u32;
         input_tokens.push(next_token);
 

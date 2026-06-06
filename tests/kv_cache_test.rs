@@ -74,3 +74,89 @@ fn test_kv_cache_equivalence() {
         );
     }
 }
+
+#[test]
+fn test_candle_kv_cache_equivalence() {
+    use candle_core::{DType, Device, Tensor};
+    use candle_nn::{VarBuilder, VarMap};
+    use llm_scratch_rs::models::gpt2_candle::{Gpt2Config, Gpt2Model};
+
+    let device = Device::Cpu;
+    let varmap = VarMap::new();
+    let vs = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+    let cfg = Gpt2Config::gpt2_mini();
+    let model = Gpt2Model::load(vs, &cfg).unwrap();
+
+    // Context / prompt tokens (cast to u32)
+    let tokens = vec![5u32, 12, 18, 4, 45, 90, 3];
+
+    // 1. Without KV cache: run the whole sequence as one pass.
+    //
+    // This builds Q/K/V for every token in one matrix call:
+    //   tokens [0,1,2,3,4,5,6]
+    //   K/V    [k0,k1,k2,k3,k4,k5,k6]
+    //
+    // The last logits row is the reference prediction for token position 6.
+    model.set_use_cache(false);
+    let tokens_t = Tensor::new(tokens.as_slice(), &device).unwrap();
+    let full_logits = model.forward(&tokens_t).unwrap();
+
+    // The last logits row (shape [seq_len, vocab_size]) is the reference prediction.
+    let seq_len = full_logits.dim(0).unwrap();
+    let expected_last_row = full_logits
+        .narrow(0, seq_len - 1, 1)
+        .unwrap()
+        .squeeze(0)
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+
+    // 2. With KV cache: run the first 4 tokens, then feed the rest one by one.
+    //
+    // First call:
+    //   input [0,1,2,3]
+    //   cache becomes K/V rows [k0,k1,k2,k3] and [v0,v1,v2,v3]
+    //
+    // Next calls:
+    //   input [4] -> append k4/v4, score q4 against k0..k4
+    //   input [5] -> append k5/v5, score q5 against k0..k5
+    //   input [6] -> append k6/v6, score q6 against k0..k6
+    //
+    // If the cache update, position offset, and causal mask are correct, the
+    // final logits for position 6 match the full-pass logits above.
+    model.set_use_cache(true);
+    model.clear_cache();
+
+    // First part: tokens 0..4
+    let first_part = &tokens[0..4];
+    let first_part_t = Tensor::new(first_part, &device).unwrap();
+    let _ = model.forward(&first_part_t).unwrap();
+
+    // Subsequent tokens one-by-one: tokens 4, 5, 6
+    let mut cached_logits = Vec::new();
+    for &token in &tokens[4..] {
+        let single_token_t = Tensor::new(&[token], &device).unwrap();
+        let logits = model.forward(&single_token_t).unwrap();
+        cached_logits = logits
+            .narrow(0, logits.dim(0).unwrap() - 1, 1)
+            .unwrap()
+            .squeeze(0)
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+    }
+
+    // Compare logits
+    assert_eq!(expected_last_row.len(), cached_logits.len());
+    for i in 0..expected_last_row.len() {
+        let diff = (expected_last_row[i] - cached_logits[i]).abs();
+        assert!(
+            diff < 1e-4,
+            "Candle Logit mismatch at index {}: expected {}, got {} (diff: {})",
+            i,
+            expected_last_row[i],
+            cached_logits[i],
+            diff
+        );
+    }
+}
