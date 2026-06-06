@@ -225,17 +225,23 @@ The current transformer demo checks that one block preserves shape:
     - [ ] 12.3 Implement bidirectional attention masking (no causal mask)
     - [ ] 12.4 Load pretrained BERT weights/tokenize with WordPiece
     - [ ] 12.5 Fine-tune BERT on text classification tasks
-- [ ] 13. LLaMA (Large Language Model Meta AI)
+- [ ] 13. LLaMA & DeepSeek Architectures
     - [ ] 13.1 Implement Rotary Position Embeddings (RoPE)
     - [ ] 13.2 Implement SwiGLU activation function
     - [ ] 13.3 Implement RMSNorm (Root Mean Square Normalization)
     - [ ] 13.4 Implement Grouped-Query Attention (GQA) and Multi-Query Attention (MQA)
     - [ ] 13.5 Load pretrained LLaMA-style model weights (e.g., TinyLLaMA) in Rust
+    - [ ] 13.6 Implement Low-Rank KV Compression (DeepSeek Multi-Head Latent Attention / MLA)
 - [ ] 14. MoE (Mixture of Experts)
     - [ ] 14.1 Implement router/gating network (top-k routing)
     - [ ] 14.2 Implement multiple feed-forward expert layers
     - [ ] 14.3 Add auxiliary load balancing loss to prevent routing collapse
     - [ ] 14.4 Verify routing path and expert utilization
+    - [ ] 14.5 Implement auxiliary-loss-free load balancing (DeepSeek-style routing)
+- [ ] 14b. Mamba & State Space Models (SSMs)
+    - [ ] 14b.1 Implement selective scan algorithm
+    - [ ] 14b.2 Implement Mamba block architecture in Candle
+    - [ ] 14b.3 Compare generation efficiency against standard Transformers
 
 ### 3. Fine-Tuning, PEFT, & Alignment
 - [ ] 15. Fine-tuning for classification
@@ -274,10 +280,12 @@ The current transformer demo checks that one block preserves shape:
     - [ ] 19.2 Implement PPO (Proximal Policy Optimization) reinforcement learning loop
     - [ ] 19.3 Implement KL divergence penalty against reference SFT model
     - [ ] 19.4 Compare generation quality before and after RLHF alignment
-- [ ] 20. DPO (Direct Preference Optimization)
+- [ ] 20. DPO & Direct Preference Variants
     - [ ] 20.1 Prepare a preference dataset (chosen vs. rejected responses)
     - [ ] 20.2 Implement the DPO loss function from scratch
     - [ ] 20.3 Fine-tune the policy model relative to a reference model
+    - [ ] 20.4 Implement Kahneman-Tversky Optimization (KTO) for binary preference signals
+    - [ ] 20.5 Implement Odds Ratio Preference Optimization (ORPO) without reference models
 
 ### 4. Reasoning & System 2 Thinking
 - [ ] 21. Reasoning Models (Chain of Thought & RL/Search)
@@ -287,26 +295,32 @@ The current transformer demo checks that one block preserves shape:
     - [ ] 21.4 Implement Group Relative Policy Optimization (GRPO) or similar RL loop for reasoning stability
 
 ### 5. Efficiency & Optimization
-- [ ] 22. FlashAttention (Memory-Efficient Attention)
+- [ ] 22. FlashAttention & Memory-Efficient Decoding
     - [ ] 22.1 Implement online softmax tiling for forward attention pass
     - [ ] 22.2 Avoid materializing the full N x N matrix in memory
     - [ ] 22.3 Compare memory usage and speed against standard attention
-- [ ] 23. Speculative Decoding
+    - [ ] 22.4 Implement PagedAttention (vLLM-style paging) to optimize decoding memory
+    - [ ] 22.5 Implement INT4 / FP4 KV-cache Quantization to reduce inference footprint
+- [ ] 23. Speculative Decoding & Constrained Generation
     - [ ] 23.1 Implement draft model and target model generation loops
     - [ ] 23.2 Implement speculative draft verification logic
     - [ ] 23.3 Benchmark generation speedup ratios
-- [ ] 24. Custom Quantization (RTN / GPTQ / AWQ)
+    - [ ] 23.4 Implement Structured Generation / Constrained decoding (regular expression and JSON schema logit masking)
+- [ ] 24. Custom Quantization & Context Window Expansion
     - [ ] 24.1 Implement Round-to-Nearest (RTN) weight quantization
     - [ ] 24.2 Create quantized linear layer forward implementations (e.g., 4-bit / 8-bit)
     - [ ] 24.3 Compare accuracy loss and memory usage profiles
+    - [ ] 24.4 Implement Context Window Expansion (YaRN, NTK-aware RoPE Scaling)
 
 ### 6. Vision, Generative & Other Domains
-- [ ] 25. VIT (Vision Transformers)
+- [ ] 25. VIT (Vision Transformers) & Multimodal Models
     - [ ] 25.1 Implement patch projection (convert 2D images to 1D patch embeddings)
     - [ ] 25.2 Add CLS class token and positional embeddings
     - [ ] 25.3 Implement ViT encoder blocks with self-attention
     - [ ] 25.4 Create classification head for vision tasks
     - [ ] 25.5 Train and evaluate on toy dataset (e.g., MNIST/CIFAR-10)
+    - [ ] 25.6 Implement Multimodal projection layer (linking patch embeddings to text decoder input space)
+    - [ ] 25.7 Implement a basic Vision-Language Model (VLM) causal forward pass
 - [ ] 26. VAE (Variational Auto Encoder)
     - [ ] 26.1 Implement Encoder network (outputting mean and log variance)
     - [ ] 26.2 Implement Reparameterization trick (sampling epsilon from N(0, I))
@@ -325,6 +339,12 @@ The current transformer demo checks that one block preserves shape:
     - [ ] 28.3 Implement U-Net architecture with cross-attention
     - [ ] 28.4 Train a simple DDPM model on 2D coordinates/shapes
     - [ ] 28.5 Integrate classifier-free guidance
+- [ ] 28b. RAG & Vector Databases
+    - [ ] 28b.1 Implement similarity search functions (Cosine, Dot Product)
+    - [ ] 28b.2 Implement a basic HNSW (Hierarchical Navigable Small World) index builder
+    - [ ] 28b.3 Implement Dense Passage Retrieval (DPR) bi-encoder pipeline
+
+
 
 ### 7. Testing & Validation
 - [ ] 29. Unit test coverage for core math and data flow
@@ -343,9 +363,11 @@ The current transformer demo checks that one block preserves shape:
     - [ ] 31.3 Test one GPT-2 forward pass with loaded weights
     - [ ] 31.4 Test generation smoke output from `gpt2_candle`
 
-
-
-
+### 8. Agentic Systems & Tool Use
+- [ ] 32. Tool Calling & ReAct Agent
+    - [ ] 32.1 Implement function signature formatting and system prompt builder
+    - [ ] 32.2 Implement JSON/XML tool execution result injection
+    - [ ] 32.3 Build a standalone ReAct (Reason-Action-Observation) agent execution loop
 
 ## Next Step
 
