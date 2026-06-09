@@ -21,6 +21,11 @@
 // This file wires the architecture only. Useful text requires training.
 // https://jaykmody.com/blog/gpt-from-scratch/
 // https://sebastianraschka.com/llms-from-scratch/
+
+
+
+// kv cacge 
+// https://touchdown-labs.com/blog/kv-cache-memory-hierarchy-inference.html
 // ════════════════════════════════════════════════════════════════════════════
 
 use crate::common::param::Param;
