@@ -22,9 +22,7 @@
 // https://jaykmody.com/blog/gpt-from-scratch/
 // https://sebastianraschka.com/llms-from-scratch/
 
-
-
-// kv cacge 
+// kv cacge
 // https://touchdown-labs.com/blog/kv-cache-memory-hierarchy-inference.html
 // ════════════════════════════════════════════════════════════════════════════
 
