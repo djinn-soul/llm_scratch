@@ -50,6 +50,7 @@
 ///     after every attention and feed-forward block, keeping signals stable.
 ///   - **Gradient Scaling**: Scaled losses dynamically to prevent underflow (tiny gradients rounding to zero)
 ///     in mixed-precision (FP16) GPU pretraining.
+// https://mbrenndoerfer.com/writing/gradient-clipping-deep-learning
 use crate::common::param::Param;
 
 pub enum ClippingStrategy {

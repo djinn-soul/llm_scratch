@@ -5,7 +5,9 @@
 // https://lilianweng.github.io/posts/2021-07-11-diffusion-models/
 // https://github.com/zelaki/Reading-Diffusion
 // https://learnopencv.com/denoising-diffusion-probabilistic-models/
-
+//https://sander.ai/
+//https://stackoverflow.com/questions/75693493/why-the-text-embedding-or-image-embedding-generated-by-clip-model-is-768-%c3%97-n/79243065#79243065
+// https://cdn.openai.com/papers/dall-e-2.pdf
 use anyhow::{Ok, Result};
 use candle_core::{DType, Device, Tensor};
 
@@ -60,6 +62,7 @@ impl BetaScheduler {
 
         // ── STEP 3: CUMULATIVE SIGNAL KEEP RATE ───────────────────────────
         // alpha_bar_t is the running product of alphas.
+        // [a,b,c]-> [a,a*b,a*b*c]
         // Example: [0.99, 0.98, 0.97] -> [0.99, 0.9702, 0.941094]
         let mut alphas_cumprod_vec = Vec::with_capacity(steps);
         let mut cumprod = 1.0f32;
@@ -276,7 +279,7 @@ impl SimpleDenoisingMlp {
         //
         //   v [batch][in_dim] @ w1^T [in_dim][hidden_dim]
         //     -> z1 [batch][hidden_dim]
-        let w1 = (Tensor::rand(0.0f32, 1.0f32, (hidden_dim, in_dim), device)? * scale1)?;
+        let w1 = (Tensor::randn(0.0f32, 1.0f32, (hidden_dim, in_dim), device)? * scale1)?;
 
         // b1 starts at zero because the random w1 already breaks symmetry.
         //
@@ -301,7 +304,7 @@ impl SimpleDenoisingMlp {
         // Each output dimension learns a different weighted mix of hidden
         // neurons. For diffusion, each output dimension is one coordinate of
         // the predicted epsilon noise.
-        let w2 = (Tensor::rand(0.0f32, 1.0f32, (out_dim, hidden_dim), device)? * scale2)?;
+        let w2 = (Tensor::randn(0.0f32, 1.0f32, (out_dim, hidden_dim), device)? * scale2)?;
 
         // b2 is one bias per predicted noise coordinate. Starting at zero means
         // the first predictions come only from the random hidden mapping; if a
@@ -372,7 +375,9 @@ impl SimpleDenoisingMlp {
         // ReLU keeps positive values and zeros negative values:
         //   z1 row = [-0.4, 1.2, 0.0]
         //   a1 row = [ 0.0, 1.2, 0.0]
-        let a1 = z1.relu()?;
+        // LeakyReLU = max(0.01 * z1, z1)
+
+        let a1 = z1.maximum(&z1.affine(0.01, 0.0)?)?;
 
         // ── LAYER 2: PREDICT NOISE ────────────────────────────────────────
         // Final affine layer:
@@ -413,10 +418,12 @@ impl SimpleDenoisingMlp {
         pred: &Tensor,
         target: &Tensor,
     ) -> Result<Gradients> {
-        // MSE gradient, ignoring final averaging constant:
-        //   dL/dpred = pred - target
-        // delta2 shape: [batch][out_dim]
-        let delta2 = pred.sub(target)?;
+        // Mathematically exact MSE gradient, including the averaging constant over batch and output dimensions:
+        //   dL/dpred = (2.0 / (batch_size * out_dim)) * (pred - target)
+        let batch_size = pred.dim(0)?;
+        let out_dim = pred.dim(1)?;
+        let scale = 2.0 / (batch_size * out_dim) as f64;
+        let delta2 = pred.sub(target)?.affine(scale, 0.0)?;
         // Layer 2 gradients: pred = a1 @ w2^T + b2
         //   dw2 = delta2^T @ a1
         //   db2 = sum rows of delta2
@@ -426,7 +433,7 @@ impl SimpleDenoisingMlp {
 
         // ReLU backward: positive z1 passes gradient, negative z1 blocks it.
         // ge(0) builds that 0/1 mask with the same shape as z1.
-        let relu_grad = z1.ge(0.0f32)?.to_dtype(DType::F32)?;
+        let relu_grad = z1.ge(0.0f32)?.to_dtype(DType::F32)?.affine(0.99, 0.01)?;
 
         // Move the output error back through w2, then apply the ReLU mask.
         //   delta1 = (delta2 @ w2) * relu_grad
@@ -443,11 +450,11 @@ impl SimpleDenoisingMlp {
         Ok(Gradients { dw1, db1, dw2, db2 })
     }
 
-    pub fn update(&mut self, grads: &Gradients, lr: f64, batch_size: usize) -> Result<()> {
-        // Gradients above are summed over the batch, so divide by batch_size
-        // during the update. The parameter rule is plain SGD:
-        //   param = param - lr * grad / batch_size
-        let scale = lr / (batch_size as f64);
+    pub fn update(&mut self, grads: &Gradients, lr: f64, _batch_size: usize) -> Result<()> {
+        // Gradients are already averaged over the batch and output dims inside backward,
+        // so the update step simplifies to standard parameter scaling:
+        //   param = param - lr * grad
+        let scale = lr;
 
         // Why `affine(scale, 0.0)` here?
         //
@@ -547,6 +554,83 @@ impl SimpleDenoisingMlp {
         //   self.b2   [out_dim]
         //   grads.db2 [out_dim]
         self.b2 = self.b2.sub(&grads.db2.affine(scale, 0.0)?)?;
+        Ok(())
+    }
+}
+
+// ════════════════════════════════════════════════════════════════
+// MLP ADAM OPTIMIZER
+// ════════════════════════════════════════════════════════════════
+pub struct MlpAdamOptimizer {
+    pub mw1: Tensor,
+    pub vw1: Tensor,
+    pub mb1: Tensor,
+    pub vb1: Tensor,
+    pub mw2: Tensor,
+    pub vw2: Tensor,
+    pub mb2: Tensor,
+    pub vb2: Tensor,
+    pub t: usize,
+    pub lr: f64,
+    pub beta1: f64,
+    pub beta2: f64,
+    pub eps: f64,
+}
+
+impl MlpAdamOptimizer {
+    pub fn new(mlp: &SimpleDenoisingMlp, lr: f64) -> Result<Self> {
+        let device = mlp.w1.device();
+        Ok(Self {
+            mw1: Tensor::zeros(mlp.w1.dims(), DType::F32, device)?,
+            vw1: Tensor::zeros(mlp.w1.dims(), DType::F32, device)?,
+            mb1: Tensor::zeros(mlp.b1.dims(), DType::F32, device)?,
+            vb1: Tensor::zeros(mlp.b1.dims(), DType::F32, device)?,
+            mw2: Tensor::zeros(mlp.w2.dims(), DType::F32, device)?,
+            vw2: Tensor::zeros(mlp.w2.dims(), DType::F32, device)?,
+            mb2: Tensor::zeros(mlp.b2.dims(), DType::F32, device)?,
+            vb2: Tensor::zeros(mlp.b2.dims(), DType::F32, device)?,
+            t: 0,
+            lr,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+        })
+    }
+
+    pub fn step(&mut self, mlp: &mut SimpleDenoisingMlp, grads: &Gradients) -> Result<()> {
+        self.t += 1;
+        let t = self.t;
+        let lr = self.lr;
+        let beta1 = self.beta1;
+        let beta2 = self.beta2;
+        let eps = self.eps;
+        let adam_update =
+            |param: &mut Tensor, m: &mut Tensor, v: &mut Tensor, grad: &Tensor| -> Result<()> {
+                // m = beta1 * m + (1 - beta1) * grad
+                let m_new = m.affine(beta1, 0.0)?.add(&grad.affine(1.0 - beta1, 0.0)?)?;
+                // v = beta2 * v + (1 - beta2) * grad^2
+                let grad_sq = grad.sqr()?;
+                let v_new = v
+                    .affine(beta2, 0.0)?
+                    .add(&grad_sq.affine(1.0 - beta2, 0.0)?)?;
+                // Bias corrections
+                let bc1 = 1.0 - beta1.powi(t as i32);
+                let bc2 = 1.0 - beta2.powi(t as i32);
+                let m_hat = m_new.affine(1.0 / bc1, 0.0)?;
+                let v_hat = v_new.affine(1.0 / bc2, 0.0)?;
+                // param = param - lr * m_hat / (sqrt(v_hat) + eps)
+                let num = m_hat.affine(lr, 0.0)?;
+                let den = v_hat.sqrt()?.affine(1.0, eps)?;
+                let update = num.div(&den)?;
+                *param = param.sub(&update)?;
+                *m = m_new;
+                *v = v_new;
+                Ok(())
+            };
+        adam_update(&mut mlp.w1, &mut self.mw1, &mut self.vw1, &grads.dw1)?;
+        adam_update(&mut mlp.b1, &mut self.mb1, &mut self.vb1, &grads.db1)?;
+        adam_update(&mut mlp.w2, &mut self.mw2, &mut self.vw2, &grads.dw2)?;
+        adam_update(&mut mlp.b2, &mut self.mb2, &mut self.vb2, &grads.db2)?;
         Ok(())
     }
 }
