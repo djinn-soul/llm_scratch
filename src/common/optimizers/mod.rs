@@ -21,6 +21,7 @@
 // - AdamW is Adam plus decoupled weight decay.
 pub mod adam;
 pub mod adam_w;
+pub mod diffusion_adam;
 pub mod optimizer;
 pub mod rmsprop;
 pub mod sgd;
@@ -29,6 +30,7 @@ pub mod sgd_m;
 pub use crate::common::param::Param;
 pub use adam::Adam;
 pub use adam_w::AdamW;
+pub use diffusion_adam::MlpAdamOptimizer;
 pub use optimizer::{ClippingStrategy, Optimizer};
 pub use rmsprop::RMSProp;
 pub use sgd::SGD;
