@@ -234,8 +234,19 @@ impl SelfAttention {
         // scores[i][j] = how much current query row i matches visible key row j.
         let k_t = mat_transpose(&k);
         let scores: Vec<Vec<f32>> = matmul(&q, &k_t);
-
-        // ── STEP 3: SCALE ───────────────────────────────────────────────────
+        // -----------------------Scale----------------------------------
+        // ── GRADIENT SCALING (ATTENTION SCORE NORMALIZATION) ──────────
+        //
+        // Why:  Q @ K^T computes a dot product over d_k dimensions. Each
+        //       term in the sum is roughly O(1) if Q and K entries are
+        //       standard normal, so the dot-product variance grows as d_k.
+        //       Large scores push softmax toward one-hot outputs, which
+        //       makes gradients vanish (∂softmax ≈ 0 at the extremes).
+        //
+        //       Dividing by sqrt(d_k) brings the variance back to ~1.0
+        //       regardless of head dimension, keeping softmax in its
+        //       responsive middle range where gradients flow.
+        //
         // Divide by sqrt(d_k). Without this, large d_k makes scores huge,
         // softmax collapses to near one-hot, and gradients vanish.
         let dk_sqrt = (self.d_k as f32).sqrt();

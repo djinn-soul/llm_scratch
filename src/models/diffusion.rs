@@ -10,10 +10,12 @@
 // https://cdn.openai.com/papers/dall-e-2.pdf
 
 pub mod denoising_mlp;
+pub mod sampling;
 pub mod scheduler;
 pub mod time_embedding;
 
 pub use crate::common::optimizers::MlpAdamOptimizer;
 pub use denoising_mlp::{Gradients, SimpleDenoisingMlp};
+pub use sampling::{sample_ddpm, sample_ddpm_from_noise};
 pub use scheduler::BetaScheduler;
 pub use time_embedding::get_time_embedding;

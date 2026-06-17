@@ -70,6 +70,16 @@ pub fn cross_entropy_backward(logits: &Vec<Vec<f32>>, targets: &Vec<usize>) -> V
         let target_id = targets[i];
         d_logits[i][target_id] -= 1.0;
 
+        // ── GRADIENT SCALING (CROSS-ENTROPY NORMALIZATION) ────────────
+        //
+        // Divide the raw gradient by the number of elements (seq_len) so
+        // the gradient represents the MEAN loss, not the SUM.
+        //
+        // Without this, longer sequences produce proportionally larger
+        // gradients, so the optimizer takes bigger steps on long sequences
+        // and smaller steps on short ones. Normalizing makes the learning
+        // rate independent of sequence length.
+        //
         // Normalize gradients by sequence length
         for j in 0..d_logits[i].len() {
             d_logits[i][j] = d_logits[i][j] / seq_len as f32;

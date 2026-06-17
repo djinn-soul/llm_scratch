@@ -154,9 +154,30 @@ impl SimpleDenoisingMlp {
         pred: &Tensor,
         target: &Tensor,
     ) -> Result<Gradients> {
-        // Exact MSE gradient:
+        // ── GRADIENT SCALING (MSE NORMALIZATION) ─────────────────────────
         //
-        // dL/dpred = (2.0 / (batch_size * out_dim)) * (pred - target)
+        // What: Divide the raw gradient sum by the total number of output
+        //       elements (batch_size × out_dim) so the gradient represents
+        //       the MEAN squared error, not the SUM.
+        //
+        // Why:  Without this normalization the gradient magnitude grows
+        //       linearly with batch size and output width. That means a
+        //       learning rate that works for batch=32 would be far too
+        //       large for batch=128, and vice versa. Dividing by the
+        //       element count makes the gradient scale-invariant:
+        //         - Doubling the batch      → same gradient magnitude
+        //         - Changing output width    → same gradient magnitude
+        //       so one learning rate works across different configurations.
+        //
+        //       The 2.0 factor here is the derivative of the squaring
+        //       operation: d/dx (x²) = 2x.
+        //
+        // Math: MSE = (1/N) × Σ (pred_i − target_i)²
+        //       dMSE/dpred_i = (2/N) × (pred_i − target_i)
+        //       where N = batch_size × out_dim = total output elements.
+        //
+        // Exact MSE gradient:
+        //   dL/dpred = (2.0 / (batch_size * out_dim)) * (pred - target)
         //
         // delta2 is the output-layer error after applying that MSE scale.
         let batch_size = pred.dim(0)?;
