@@ -1,7 +1,7 @@
 use anyhow::{Ok, Result};
 use candle_core::{Device, Tensor};
 
-use super::{get_time_embedding, BetaScheduler, SimpleDenoisingMlp};
+use super::{get_time_embedding, BetaScheduler, DenoisingModel};
 
 // DDPM REVERSE SAMPLING
 //
@@ -13,11 +13,10 @@ use super::{get_time_embedding, BetaScheduler, SimpleDenoisingMlp};
 // - Class-conditioned sampling: same reverse loop shape, but the model input
 //   must also receive class information or guidance.
 //
-// The current function is intentionally MLP-specific because
-// SimpleDenoisingMlp expects concat(x_t, time_embedding). A future UNet or
-// class-conditioned model can get a sibling sampler or a shared denoiser trait.
+// All sampling functions accept `&dyn DenoisingModel` so they work with any
+// noise-prediction architecture (MLP, UNet, Transformer, etc.) without change.
 pub fn sample_ddpm(
-    mlp: &SimpleDenoisingMlp,
+    model: &dyn DenoisingModel,
     scheduler: &BetaScheduler,
     num_samples: usize,
     img_dim: usize,
@@ -27,11 +26,11 @@ pub fn sample_ddpm(
     // Start from x_T ~ N(0, I). The reverse chain will denoise this into x_0.
     let xt = Tensor::randn(0.0f32, 1.0f32, (num_samples, img_dim), device)?;
 
-    sample_ddpm_from_noise(mlp, scheduler, xt, img_dim, time_emb_dim, device)
+    sample_ddpm_from_noise(model, scheduler, xt, img_dim, time_emb_dim, device)
 }
 
 pub fn sample_ddpm_from_noise(
-    mlp: &SimpleDenoisingMlp,
+    model: &dyn DenoisingModel,
     scheduler: &BetaScheduler,
     mut xt: Tensor,
     img_dim: usize,
@@ -59,7 +58,7 @@ pub fn sample_ddpm_from_noise(
     // Each step removes a small amount of noise guided by the model.
     for t_step in (0..scheduler.steps).rev() {
         xt = ddpm_reverse_step(
-            mlp,
+            model,
             &xt,
             t_step,
             num_samples,
@@ -77,7 +76,7 @@ pub fn sample_ddpm_from_noise(
 }
 
 fn ddpm_reverse_step(
-    mlp: &SimpleDenoisingMlp,
+    model: &dyn DenoisingModel,
     xt: &Tensor,
     t_step: usize,
     num_samples: usize,
@@ -114,9 +113,9 @@ fn ddpm_reverse_step(
 
     // Step R4: Ask the model to predict the noise epsilon_hat in x_t.
     //
-    // We discard the intermediate activations (_, _) because sampling is
+    // We discard the intermediate activations because sampling is
     // inference only. There is no backward pass here.
-    let (pred_noise, _, _) = mlp.forward(&v)?;
+    let (pred_noise, _intermediates) = model.forward(&v)?;
 
     // Step R5: Retrieve precomputed schedule coefficients for this timestep.
     //
@@ -201,7 +200,7 @@ fn ddpm_reverse_step(
 //   that class at every single reverse step.
 //
 // Arguments:
-//   mlp              — trained class-conditioned denoising MLP
+//   model            — any trained denoising model implementing DenoisingModel
 //   scheduler        — beta/alpha schedule (same as training)
 //   xt               — initial noise tensor x_T, shape (num_samples, img_dim)
 //   img_dim          — flattened image size (784 for MNIST)
@@ -209,7 +208,7 @@ fn ddpm_reverse_step(
 //   class_one_hot    — one-hot class vector, shape (num_samples, num_classes)
 //   device           — CPU or CUDA device
 pub fn sample_ddpm_cond(
-    mlp: &SimpleDenoisingMlp,
+    model: &dyn DenoisingModel,
     scheduler: &BetaScheduler,
     mut xt: Tensor,
     img_dim: usize,
@@ -255,7 +254,7 @@ pub fn sample_ddpm_cond(
         // epsilon_hat = epsilon_theta(x_t, t, c)
         // The model's estimate of the added noise, conditioned on timestep t
         // and class label c (embedded as the one-hot vector).
-        let (pred_noise, _, _) = mlp.forward(&v)?;
+        let (pred_noise, _intermediates) = model.forward(&v)?;
 
         // --- Step 5: Retrieve schedule coefficients for this step -----------
         let beta = betas[t_step];
@@ -320,7 +319,7 @@ pub fn sample_ddpm_cond(
 //   sample diversity for stronger class fidelity.
 //
 // Arguments:
-//   mlp            — trained CFG-aware denoising MLP
+//   model          — any trained CFG-aware model implementing DenoisingModel
 //   scheduler      — pre-computed noise schedule (same as training)
 //   xt             — initial noise tensor x_T ~ N(0,I), shape (N, img_dim)
 //   img_dim        — flattened image size (784 for MNIST)
@@ -329,7 +328,7 @@ pub fn sample_ddpm_cond(
 //   guidance_scale — guidance strength s (1.0 = no extra guidance, 3-7 typical)
 //   device         — CPU or CUDA device
 pub fn sample_ddpm_cfg(
-    mlp: &SimpleDenoisingMlp,
+    model: &dyn DenoisingModel,
     scheduler: &BetaScheduler,
     mut xt: Tensor,
     img_dim: usize,
@@ -342,10 +341,10 @@ pub fn sample_ddpm_cfg(
 
     // Pre-extract schedule coefficients into plain Vecs for O(1) indexed access.
     // Avoids repeated Tensor slicing inside the per-step loop.
-    let betas          = scheduler.betas.to_vec1::<f32>()?;
-    let alphas         = scheduler.alphas.to_vec1::<f32>()?;
+    let betas = scheduler.betas.to_vec1::<f32>()?;
+    let alphas = scheduler.alphas.to_vec1::<f32>()?;
     let alphas_cumprod = scheduler.alphas_cumprod.to_vec1::<f32>()?;
-    let sigmas         = scheduler.sigmas.to_vec1::<f32>()?;
+    let sigmas = scheduler.sigmas.to_vec1::<f32>()?;
 
     // Build the "null" (unconditional) conditioning vector once.
     // Shape matches class_one_hot but every element is 0.0.
@@ -389,8 +388,8 @@ pub fn sample_ddpm_cfg(
         //   model twice per reverse step.
         //
         // Note: intermediate activations are discarded — we're at inference.
-        let (pred_cond,   _, _) = mlp.forward(&v_cond)?;
-        let (pred_uncond, _, _) = mlp.forward(&v_null)?;
+        let (pred_cond, _) = model.forward(&v_cond)?;
+        let (pred_uncond, _) = model.forward(&v_null)?;
 
         // Step 5: Compute the CFG-modified noise prediction.
         //
@@ -407,8 +406,8 @@ pub fn sample_ddpm_cfg(
         //   class-faithful samples than conditional sampling alone.
         let pred_noise = pred_cond.add(
             &pred_cond
-                .sub(&pred_uncond)?              // (epsilon_cond - epsilon_uncond)
-                .affine(guidance_scale, 0.0)?,   // * s
+                .sub(&pred_uncond)? // (epsilon_cond - epsilon_uncond)
+                .affine(guidance_scale, 0.0)?, // * s
         )?;
 
         // Step 6: Retrieve schedule coefficients for this timestep.
@@ -416,10 +415,10 @@ pub fn sample_ddpm_cfg(
         //   alpha     = alpha_t = 1 - beta_t
         //   alpha_bar = cumulative product of alpha values up to t
         //   sigma     = sqrt(beta_t) — stochastic term std dev
-        let beta      = betas[t_step];
-        let alpha     = alphas[t_step];
+        let beta = betas[t_step];
+        let alpha = alphas[t_step];
         let alpha_bar = alphas_cumprod[t_step];
-        let sigma     = sigmas[t_step];
+        let sigma = sigmas[t_step];
 
         // Step 7: Epsilon coefficient for the reverse posterior mean.
         //   eps_coef = beta_t / sqrt(1 - alpha_bar_t)
@@ -459,4 +458,3 @@ pub fn sample_ddpm_cfg(
 
     Ok(xt)
 }
-

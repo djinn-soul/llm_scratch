@@ -1,6 +1,8 @@
 use anyhow::Result;
 use candle_core::{Device, Tensor};
-use llm_scratch_rs::models::diffusion::{get_time_embedding, BetaScheduler, SimpleDenoisingMlp};
+use llm_scratch_rs::models::diffusion::{
+    get_time_embedding, BetaScheduler, DenoisingModel, SimpleDenoisingMlp,
+};
 
 #[test]
 fn test_beta_scheduler() -> Result<()> {
@@ -54,24 +56,34 @@ fn test_mlp_forward_backward_update() -> Result<()> {
     let v = Tensor::randn(0.0f32, 1.0f32, (batch_size, in_dim), device)?;
     let target = Tensor::randn(0.0f32, 1.0f32, (batch_size, out_dim), device)?;
 
-    // Forward pass
-    let (pred, a1, z1) = mlp.forward(&v)?;
+    // Forward pass (through the trait).
+    let (pred, intermediates) = DenoisingModel::forward(&mlp, &v)?;
     assert_eq!(pred.dims(), &[batch_size, out_dim]);
-    assert_eq!(a1.dims(), &[batch_size, hidden_dim]);
-    assert_eq!(z1.dims(), &[batch_size, hidden_dim]);
+    // The MLP implementation packs two intermediates: a1 and z1.
+    assert_eq!(intermediates.len(), 2);
+    assert_eq!(intermediates[0].dims(), &[batch_size, hidden_dim]); // a1
+    assert_eq!(intermediates[1].dims(), &[batch_size, hidden_dim]); // z1
 
     // Save initial weights
     let initial_w1 = mlp.w1.clone();
 
-    // Backward pass
-    let grads = mlp.backward(&v, &a1, &z1, &pred, &target)?;
-    assert_eq!(grads.dw1.dims(), &[hidden_dim, in_dim]);
-    assert_eq!(grads.db1.dims(), &[hidden_dim]);
-    assert_eq!(grads.dw2.dims(), &[out_dim, hidden_dim]);
-    assert_eq!(grads.db2.dims(), &[out_dim]);
+    // Backward pass (through the trait).
+    let grads = DenoisingModel::backward(&mlp, &v, &intermediates, &pred, &target)?;
+    // The MLP returns 4 gradient tensors: dw1, db1, dw2, db2.
+    assert_eq!(grads.len(), 4);
+    assert_eq!(grads[0].dims(), &[hidden_dim, in_dim]); // dw1
+    assert_eq!(grads[1].dims(), &[hidden_dim]); // db1
+    assert_eq!(grads[2].dims(), &[out_dim, hidden_dim]); // dw2
+    assert_eq!(grads[3].dims(), &[out_dim]); // db2
 
-    // Update weights
-    mlp.update(&grads, 0.1, batch_size)?;
+    // Update weights via the legacy concrete method.
+    let legacy_grads = llm_scratch_rs::models::diffusion::Gradients {
+        dw1: grads[0].clone(),
+        db1: grads[1].clone(),
+        dw2: grads[2].clone(),
+        db2: grads[3].clone(),
+    };
+    mlp.update(&legacy_grads, 0.1, batch_size)?;
 
     // Verify weights actually changed
     let diff = mlp

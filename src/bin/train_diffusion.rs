@@ -31,7 +31,7 @@ use candle_core::{DType, Device, Tensor};
 //   `SimpleDenoisingMlp`    — two-layer MLP: input → hidden → output
 //   `sample_ddpm_from_noise`— shared reverse diffusion sampler (unconditional)
 use llm_scratch_rs::models::diffusion::{
-    get_time_embedding, sample_ddpm_from_noise, BetaScheduler, MlpAdamOptimizer,
+    get_time_embedding, sample_ddpm_from_noise, BetaScheduler, DenoisingModel, MlpAdamOptimizer,
     SimpleDenoisingMlp,
 };
 
@@ -101,13 +101,13 @@ fn main() -> Result<()> {
     // lr               — Adam learning rate.
     //                    0.001 is the standard Adam default (Kingma & Ba 2015).
     // =========================================================================
-    let steps        = 100;   // T: total diffusion timesteps
-    let time_emb_dim = 16;    // dimensionality of sinusoidal time encoding
-    let img_dim      = 784;   // 28×28 flattened image size
-    let hidden_dim   = 512;   // hidden layer width of the denoising MLP
-    let batch_size   = 128;   // mini-batch size per gradient step
-    let epochs       = 20000; // total number of gradient update steps
-    let lr           = 0.001; // Adam learning rate (α)
+    let steps = 100; // T: total diffusion timesteps
+    let time_emb_dim = 16; // dimensionality of sinusoidal time encoding
+    let img_dim = 784; // 28×28 flattened image size
+    let hidden_dim = 512; // hidden layer width of the denoising MLP
+    let batch_size = 128; // mini-batch size per gradient step
+    let epochs = 20000; // total number of gradient update steps
+    let lr = 0.001; // Adam learning rate (α)
 
     // --- Build the beta schedule ---------------------------------------------
     // `BetaScheduler` pre-computes a *linear* beta schedule from β_1=0.0001
@@ -247,7 +247,7 @@ fn main() -> Result<()> {
         //   Our manual backprop implementation needs the cached activations to
         //   compute gradients efficiently (chain rule).  Autograd frameworks
         //   (e.g., PyTorch) do this automatically in their computation graph.
-        let (pred, a1, z1) = mlp.forward(&v)?;
+        let (pred, intermediates) = DenoisingModel::forward(&mlp, &v)?;
 
         // ---------------------------------------------------------------------
         // Step 6 — Compute MSE loss between predicted and true noise
@@ -276,7 +276,7 @@ fn main() -> Result<()> {
         //   db1  — gradient w.r.t. first layer biases
         //   dw2  — gradient w.r.t. second layer weights (hidden→output)
         //   db2  — gradient w.r.t. second layer biases
-        let grads = mlp.backward(&v, &a1, &z1, &pred, &noise)?;
+        let grads = DenoisingModel::backward(&mlp, &v, &intermediates, &pred, &noise)?;
 
         // ---------------------------------------------------------------------
         // Step 8 — Adam optimizer step: update weights using the gradients
@@ -291,6 +291,8 @@ fn main() -> Result<()> {
         // This adapts the step size for each parameter individually and handles
         // sparse or noisy gradients better than plain gradient descent.
         optimizer.step(&mut mlp, &grads)?;
+
+        let param_names = mlp.param_names();
 
         // ---------------------------------------------------------------------
         // Step 9 — Periodic logging: print loss and gradient norms
@@ -307,11 +309,21 @@ fn main() -> Result<()> {
         //   flood the terminal.  Every 100 steps gives a smooth curve without
         //   overhead.
         if epoch % 100 == 0 || epoch == 1 {
-            let dw1_norm = grads.dw1.sqr()?.sum_all()?.to_scalar::<f32>()?.sqrt();
-            let dw2_norm = grads.dw2.sqr()?.sum_all()?.to_scalar::<f32>()?.sqrt();
+            let grad_norms: Vec<f32> = grads
+                .iter()
+                .map(|g| -> Result<f32> { Ok(g.sqr()?.sum_all()?.to_scalar::<f32>()?.sqrt()) })
+                .collect::<Result<_>>()?;
+            let norms_str: Vec<String> = param_names
+                .iter()
+                .zip(grad_norms.iter())
+                .map(|(name, norm)| format!("{} norm: {:.4}", name, norm))
+                .collect();
             println!(
-                "Epoch {:4}/{} - MSE Loss: {:.6} | dw1 norm: {:.4}, dw2 norm: {:.4}",
-                epoch, epochs, loss, dw1_norm, dw2_norm
+                "Epoch {:4}/{} - MSE Loss: {:.6} | {}",
+                epoch,
+                epochs,
+                loss,
+                norms_str.join(", ")
             );
         }
     }

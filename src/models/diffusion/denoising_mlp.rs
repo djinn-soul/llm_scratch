@@ -1,5 +1,7 @@
-use anyhow::{Ok, Result};
+use anyhow::{bail, Ok, Result};
 use candle_core::{DType, Device, Tensor};
+
+use super::denoising_model::DenoisingModel;
 
 // MANUAL BACKPROPAGATION DENOISING MLP
 //
@@ -238,5 +240,66 @@ impl SimpleDenoisingMlp {
         self.w2 = self.w2.sub(&grads.dw2.affine(lr, 0.0)?)?;
         self.b2 = self.b2.sub(&grads.db2.affine(lr, 0.0)?)?;
         Ok(())
+    }
+}
+
+// DENOISING MODEL TRAIT IMPLEMENTATION
+//
+// This bridges the concrete MLP to the generic DenoisingModel trait.
+//
+// The mapping is straightforward:
+//
+//   Trait concept          MLP implementation
+//   ─────────────          ──────────────────
+//   intermediates[0]  →    a1 (post-activation hidden layer)
+//   intermediates[1]  →    z1 (pre-activation hidden layer)
+//   grads[0]          →    dw1  (layer 1 weights)
+//   grads[1]          →    db1  (layer 1 biases)
+//   grads[2]          →    dw2  (layer 2 weights)
+//   grads[3]          →    db2  (layer 2 biases)
+//   params[0..3]      →    w1, b1, w2, b2 (same order)
+impl DenoisingModel for SimpleDenoisingMlp {
+    fn forward(&self, v: &Tensor) -> Result<(Tensor, Vec<Tensor>)> {
+        let (pred, a1, z1) = self.forward(v)?;
+        // Pack the two intermediate tensors into a Vec for the trait's opaque
+        // intermediates contract. The order (a1, z1) is private to this impl;
+        // backward() unpacks them in the same order.
+        Ok((pred, vec![a1, z1]))
+    }
+
+    fn backward(
+        &self,
+        v: &Tensor,
+        intermediates: &[Tensor],
+        pred: &Tensor,
+        target: &Tensor,
+    ) -> Result<Vec<Tensor>> {
+        if intermediates.len() != 2 {
+            bail!(
+                "SimpleDenoisingMlp expected 2 cached intermediates from forward(), got {}",
+                intermediates.len()
+            );
+        }
+
+        // Unpack the opaque intermediates created in forward().
+        let a1 = &intermediates[0];
+        let z1 = &intermediates[1];
+
+        let grads = self.backward(v, a1, z1, pred, target)?;
+
+        // Return gradients in the same order as params(): w1, b1, w2, b2.
+        Ok(vec![grads.dw1, grads.db1, grads.dw2, grads.db2])
+    }
+
+    fn params(&self) -> Vec<&Tensor> {
+        vec![&self.w1, &self.b1, &self.w2, &self.b2]
+    }
+
+    fn params_mut(&mut self) -> Vec<&mut Tensor> {
+        vec![&mut self.w1, &mut self.b1, &mut self.w2, &mut self.b2]
+    }
+
+    fn param_names(&self) -> Vec<&str> {
+        vec!["w1", "b1", "w2", "b2"]
     }
 }

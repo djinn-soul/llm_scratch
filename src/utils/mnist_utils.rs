@@ -156,7 +156,10 @@ pub fn load_mnist_images(path: &str, device: &Device) -> Result<Tensor> {
     reader.read_exact(&mut magic)?;
     let magic_num = u32::from_be_bytes(magic);
     if magic_num != 2051 {
-        bail!("Invalid MNIST image magic number: {} (expected 2051)", magic_num);
+        bail!(
+            "Invalid MNIST image magic number: {} (expected 2051)",
+            magic_num
+        );
     }
 
     // --- Step 2: Read dimension metadata (12 bytes = 3 × u32) ---------------
@@ -202,7 +205,10 @@ pub fn load_mnist_labels(path: &str) -> Result<Vec<u8>> {
     reader.read_exact(&mut magic)?;
     let magic_num = u32::from_be_bytes(magic);
     if magic_num != 2049 {
-        bail!("Invalid MNIST label magic number: {} (expected 2049)", magic_num);
+        bail!(
+            "Invalid MNIST label magic number: {} (expected 2049)",
+            magic_num
+        );
     }
 
     // Read the item count.
@@ -245,7 +251,11 @@ pub fn make_one_hot(labels: &[u8], device: &Device) -> Result<Tensor> {
     }
 
     // Build a 2-D tensor from the flat buffer.
-    Ok(Tensor::from_vec(one_hot_vec, (labels.len(), num_classes), device)?)
+    Ok(Tensor::from_vec(
+        one_hot_vec,
+        (labels.len(), num_classes),
+        device,
+    )?)
 }
 
 // =============================================================================

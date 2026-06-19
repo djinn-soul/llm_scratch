@@ -35,7 +35,8 @@ use candle_core::{DType, Device, Tensor};
 //   SimpleDenoisingMlp  — two-layer fully-connected denoising network
 //   sample_ddpm_cond    — shared reverse diffusion sampler with class conditioning
 use llm_scratch_rs::models::diffusion::{
-    get_time_embedding, BetaScheduler, MlpAdamOptimizer, SimpleDenoisingMlp, sample_ddpm_cond,
+    get_time_embedding, sample_ddpm_cond, BetaScheduler, DenoisingModel, MlpAdamOptimizer,
+    SimpleDenoisingMlp,
 };
 
 // Shared MNIST helpers: download, parse binary files, build one-hot tensors,
@@ -102,14 +103,14 @@ fn main() -> Result<()> {
     //
     // lr               — Adam learning rate (Kingma & Ba default: 0.001).
     // =========================================================================
-    let steps        = 100;  // T: total diffusion timesteps
-    let time_emb_dim = 16;   // sinusoidal time embedding dimension
-    let class_dim    = 10;   // one-hot label dimension (digits 0–9)
-    let img_dim      = 784;  // 28×28 flattened image size
-    let hidden_dim   = 512;  // hidden layer width
-    let batch_size   = 128;  // mini-batch size per gradient step
-    let epochs       = 8000; // total gradient update steps
-    let lr           = 0.001;// Adam learning rate (α)
+    let steps = 100; // T: total diffusion timesteps
+    let time_emb_dim = 16; // sinusoidal time embedding dimension
+    let class_dim = 10; // one-hot label dimension (digits 0–9)
+    let img_dim = 784; // 28×28 flattened image size
+    let hidden_dim = 512; // hidden layer width
+    let batch_size = 128; // mini-batch size per gradient step
+    let epochs = 8000; // total gradient update steps
+    let lr = 0.001; // Adam learning rate (α)
 
     // --- Build the beta schedule ---------------------------------------------
     // Linear schedule from β_1=0.0001 to β_T=0.02 (original DDPM paper).
@@ -132,8 +133,8 @@ fn main() -> Result<()> {
     //   ε has the same shape as the image, so output_dim = img_dim = 784.
     let mut mlp = SimpleDenoisingMlp::new(
         img_dim + time_emb_dim + class_dim, // 810
-        hidden_dim,                          // 512
-        img_dim,                             // 784
+        hidden_dim,                         // 512
+        img_dim,                            // 784
         &device,
     )?;
 
@@ -249,7 +250,7 @@ fn main() -> Result<()> {
         //   pred — predicted noise ε̂,  shape (batch_size, 784)
         //   a1   — post-ReLU hidden activations (cached for backprop chain rule)
         //   z1   — pre-ReLU hidden activations  (cached for backprop chain rule)
-        let (pred, a1, z1) = mlp.forward(&v)?;
+        let (pred, intermediates) = DenoisingModel::forward(&mlp, &v)?;
 
         // ---------------------------------------------------------------------
         // Step 6 — Compute MSE loss: L = (1/N) Σ (ε̂ − ε)²
@@ -269,7 +270,7 @@ fn main() -> Result<()> {
         //   This MLP uses a hand-rolled backward pass because Candle's autograd
         //   was not yet complete for all ops used here.  The chain rule gives us
         //   gradients for both linear layers (dw1, db1, dw2, db2).
-        let grads = mlp.backward(&v, &a1, &z1, &pred, &noise)?;
+        let grads = DenoisingModel::backward(&mlp, &v, &intermediates, &pred, &noise)?;
 
         // ---------------------------------------------------------------------
         // Step 8 — Adam optimiser step: θ ← θ − lr * Adam(∇θ L)
@@ -278,6 +279,8 @@ fn main() -> Result<()> {
         // applies per-parameter adaptive learning rates.  This is more robust
         // to noisy gradients than SGD with a fixed step size.
         optimizer.step(&mut mlp, &grads)?;
+
+        let param_names = mlp.param_names();
 
         // ---------------------------------------------------------------------
         // Step 9 — Periodic logging every 100 steps
@@ -288,11 +291,21 @@ fn main() -> Result<()> {
         // Logging every 100 steps avoids stdout overhead while still giving
         // a smooth loss curve.
         if epoch % 100 == 0 || epoch == 1 {
-            let dw1_norm = grads.dw1.sqr()?.sum_all()?.to_scalar::<f32>()?.sqrt();
-            let dw2_norm = grads.dw2.sqr()?.sum_all()?.to_scalar::<f32>()?.sqrt();
+            let grad_norms: Vec<f32> = grads
+                .iter()
+                .map(|g| -> Result<f32> { Ok(g.sqr()?.sum_all()?.to_scalar::<f32>()?.sqrt()) })
+                .collect::<Result<_>>()?;
+            let norms_str: Vec<String> = param_names
+                .iter()
+                .zip(grad_norms.iter())
+                .map(|(name, norm)| format!("{} norm: {:.4}", name, norm))
+                .collect();
             println!(
-                "Epoch {:5}/{} - MSE Loss: {:.6} | dw1 norm: {:.4}, dw2 norm: {:.4}",
-                epoch, epochs, loss, dw1_norm, dw2_norm
+                "Epoch {:5}/{} - MSE Loss: {:.6} | {}",
+                epoch,
+                epochs,
+                loss,
+                norms_str.join(", ")
             );
         }
     }

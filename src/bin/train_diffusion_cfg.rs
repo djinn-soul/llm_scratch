@@ -47,7 +47,7 @@ use llm_scratch_rs::models::diffusion::sampling::sample_ddpm_cfg;
 
 // Standard diffusion model components.
 use llm_scratch_rs::models::diffusion::{
-    get_time_embedding, BetaScheduler, MlpAdamOptimizer, SimpleDenoisingMlp,
+    get_time_embedding, BetaScheduler, DenoisingModel, MlpAdamOptimizer, SimpleDenoisingMlp,
 };
 
 // Shared MNIST download + parse helpers and PNG writer.
@@ -159,14 +159,14 @@ pub fn main() -> Result<()> {
     //                   Creates the unconditional branch ε_θ(x_t, t, ∅) that
     //                   CFG guidance relies on at inference.
     // =========================================================================
-    let steps         = 100;   // T: total diffusion timesteps
-    let time_emb_dim  = 16;    // sinusoidal time embedding dimension
-    let class_dim     = 10;    // one-hot label vector size (digits 0-9)
-    let img_dim       = 784;   // 28x28 flattened image size
-    let hidden_dim    = 512;   // MLP hidden layer width
-    let batch_size    = 128;   // mini-batch size per gradient step
-    let epochs        = 12000; // total gradient update steps
-    let lr            = 0.001; // Adam learning rate
+    let steps = 100; // T: total diffusion timesteps
+    let time_emb_dim = 16; // sinusoidal time embedding dimension
+    let class_dim = 10; // one-hot label vector size (digits 0-9)
+    let img_dim = 784; // 28x28 flattened image size
+    let hidden_dim = 512; // MLP hidden layer width
+    let batch_size = 128; // mini-batch size per gradient step
+    let epochs = 12000; // total gradient update steps
+    let lr = 0.001; // Adam learning rate
     let label_dropout = 0.15f32; // label drop probability for CFG training
 
     // --- Beta schedule -------------------------------------------------------
@@ -186,8 +186,8 @@ pub fn main() -> Result<()> {
     //     - When the label slot is all-zeros: unconditional denoising
     let mut mlp = SimpleDenoisingMlp::new(
         img_dim + time_emb_dim + class_dim, // 810
-        hidden_dim,                          // 512
-        img_dim,                             // 784
+        hidden_dim,                         // 512
+        img_dim,                            // 784
         &device,
     )?;
 
@@ -275,7 +275,7 @@ pub fn main() -> Result<()> {
         // ---------------------------------------------------------------------
         // The MLP returns pred, a1 (post-ReLU hidden activations), and
         // z1 (pre-ReLU), which are needed for the manual backward pass.
-        let (pred, a1, z1) = mlp.forward(&v)?;
+        let (pred, intermediates) = DenoisingModel::forward(&mlp, &v)?;
 
         // ---------------------------------------------------------------------
         // Step 6 — MSE loss: L = (1/N) sum (epsilon_hat - epsilon)^2
@@ -289,12 +289,14 @@ pub fn main() -> Result<()> {
         // Step 7 — Backpropagation: compute dL/dW for all parameters
         // ---------------------------------------------------------------------
         // Manual chain-rule backward pass (Candle autograd not used here).
-        let grads = mlp.backward(&v, &a1, &z1, &pred, &noise)?;
+        let grads = DenoisingModel::backward(&mlp, &v, &intermediates, &pred, &noise)?;
 
         // ---------------------------------------------------------------------
         // Step 8 — Adam optimizer step: theta <- theta - lr * Adam(grad)
         // ---------------------------------------------------------------------
         optimizer.step(&mut mlp, &grads)?;
+
+        let param_names = mlp.param_names();
 
         // ---------------------------------------------------------------------
         // Step 9 — Periodic logging: MSE loss + gradient norms
@@ -302,11 +304,21 @@ pub fn main() -> Result<()> {
         // Gradient norms reveal vanishing (<< expected) or exploding (>> expected)
         // gradients without requiring a separate validation loop.
         if epoch % 100 == 0 || epoch == 1 {
-            let dw1_norm = grads.dw1.sqr()?.sum_all()?.to_scalar::<f32>()?.sqrt();
-            let dw2_norm = grads.dw2.sqr()?.sum_all()?.to_scalar::<f32>()?.sqrt();
+            let grad_norms: Vec<f32> = grads
+                .iter()
+                .map(|g| -> Result<f32> { Ok(g.sqr()?.sum_all()?.to_scalar::<f32>()?.sqrt()) })
+                .collect::<Result<_>>()?;
+            let norms_str: Vec<String> = param_names
+                .iter()
+                .zip(grad_norms.iter())
+                .map(|(name, norm)| format!("{} norm: {:.4}", name, norm))
+                .collect();
             println!(
-                "Epoch {:5}/{} - MSE Loss: {:.6} | dw1 norm: {:.4}, dw2 norm: {:.4}",
-                epoch, epochs, loss, dw1_norm, dw2_norm
+                "Epoch {:5}/{} - MSE Loss: {:.6} | {}",
+                epoch,
+                epochs,
+                loss,
+                norms_str.join(", ")
             );
         }
     }
