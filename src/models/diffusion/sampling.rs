@@ -258,10 +258,10 @@ pub fn sample_ddpm_cond(
         let (pred_noise, _, _) = mlp.forward(&v)?;
 
         // --- Step 5: Retrieve schedule coefficients for this step -----------
-        let beta      = betas[t_step];
-        let alpha     = alphas[t_step];
+        let beta = betas[t_step];
+        let alpha = alphas[t_step];
         let alpha_bar = alphas_cumprod[t_step];
-        let sigma     = sigmas[t_step];
+        let sigma = sigmas[t_step];
 
         // --- Step 6: Epsilon scaling coefficient ----------------------------
         // eps_coef = beta_t / sqrt(1 - alpha_bar_t)
@@ -290,7 +290,44 @@ pub fn sample_ddpm_cond(
     Ok(xt)
 }
 
-
+// =============================================================================
+// sample_ddpm_cfg — Classifier-Free Guidance (CFG) reverse diffusion sampler
+// =============================================================================
+//
+// WHAT IS CFG?
+//   CFG is an inference-time technique that amplifies the model's class signal
+//   without requiring a separate classifier.  Because the model was trained
+//   with stochastic label dropout, it has implicitly learned two distributions:
+//
+//     epsilon_theta(x_t, t, c)  — conditional noise prediction (given class c)
+//     epsilon_theta(x_t, t, ∅)  — unconditional noise prediction (null label)
+//
+//   At each reverse step we compute BOTH predictions and blend them:
+//
+//     epsilon_guided = epsilon_cond + s * (epsilon_cond - epsilon_uncond)
+//
+//   where s ≥ 1 is the guidance_scale.
+//
+// WHY does this make the output more class-faithful?
+//   (epsilon_cond - epsilon_uncond) is the "direction" in noise space that
+//   points from unconditional toward the target class.  Scaling it by s and
+//   adding it to epsilon_cond amplifies that direction, steering the denoising
+//   trajectory more aggressively toward the requested class.
+//
+// WHY does a higher s reduce diversity?
+//   Larger guidance pushes every sample further in the same class direction,
+//   reducing the spread of the latent space around that class.  This trades
+//   sample diversity for stronger class fidelity.
+//
+// Arguments:
+//   mlp            — trained CFG-aware denoising MLP
+//   scheduler      — pre-computed noise schedule (same as training)
+//   xt             — initial noise tensor x_T ~ N(0,I), shape (N, img_dim)
+//   img_dim        — flattened image size (784 for MNIST)
+//   time_emb_dim   — sinusoidal time embedding size (must match training)
+//   class_one_hot  — target class one-hot vector, shape (N, num_classes)
+//   guidance_scale — guidance strength s (1.0 = no extra guidance, 3-7 typical)
+//   device         — CPU or CUDA device
 pub fn sample_ddpm_cfg(
     mlp: &SimpleDenoisingMlp,
     scheduler: &BetaScheduler,
@@ -298,53 +335,128 @@ pub fn sample_ddpm_cfg(
     img_dim: usize,
     time_emb_dim: usize,
     class_one_hot: &Tensor,
-    guidance_scale:f64,
+    guidance_scale: f64,
     device: &Device,
 ) -> Result<Tensor> {
     let num_samples = xt.dim(0)?;
 
-    let betas = scheduler.betas.to_vec1::<f32>()?;
-    let alphas = scheduler.alphas.to_vec1::<f32>()?;
+    // Pre-extract schedule coefficients into plain Vecs for O(1) indexed access.
+    // Avoids repeated Tensor slicing inside the per-step loop.
+    let betas          = scheduler.betas.to_vec1::<f32>()?;
+    let alphas         = scheduler.alphas.to_vec1::<f32>()?;
     let alphas_cumprod = scheduler.alphas_cumprod.to_vec1::<f32>()?;
-    let sigmas = scheduler.sigmas.to_vec1::<f32>()?;
-    
-    let null_one_hot = Tensor::zeros(class_one_hot.dims(),class_one_hot.dtype(),device)?;
+    let sigmas         = scheduler.sigmas.to_vec1::<f32>()?;
 
+    // Build the "null" (unconditional) conditioning vector once.
+    // Shape matches class_one_hot but every element is 0.0.
+    //
+    // WHY all-zeros for the null class?
+    //   During training, dropped labels were represented as all-zeros rows.
+    //   The model learned to associate all-zeros with "unconditional" denoising.
+    //   Using the same convention at inference ensures it activates the correct
+    //   unconditional behaviour.
+    let null_one_hot = Tensor::zeros(class_one_hot.dims(), class_one_hot.dtype(), device)?;
+
+    // --- Reverse diffusion loop: t = T-1 → 0 --------------------------------
+    // WHY iterate in reverse? The forward process adds noise (x_0 → x_T).
+    //                         The reverse process removes noise (x_T → x_0).
     for t_step in (0..scheduler.steps).rev() {
-        let t_vec = vec![t_step as u32 ; num_samples];
-        let t_tensor = Tensor::new(t_vec.as_slice(),device)?;
+        // Step 1: Build the timestep tensor for this reverse step.
+        // Same value repeated for all samples in the batch.
+        let t_vec = vec![t_step as u32; num_samples];
+        let t_tensor = Tensor::new(t_vec.as_slice(), device)?;
+
+        // Step 2: Sinusoidal time embedding — must match the one used at training.
         let time_emb = get_time_embedding(&t_tensor, time_emb_dim)?;
 
-        let v_cond = Tensor::cat(&[&xt,&time_emb,class_one_hot], 1)?;
-        let v_null = Tensor::cat(&[&xt,&time_emb,&null_one_hot], 1)?;
+        // Step 3: Build BOTH the conditional and unconditional model inputs.
+        //
+        // v_cond:  concat(x_t, time_emb, class_one_hot)  — the "guided" input
+        // v_null:  concat(x_t, time_emb, null_one_hot)   — the "free" input
+        //
+        // WHY send x_t and time_emb to both?
+        //   The only difference between the two predictions should be the label.
+        //   Keeping x_t and time_emb identical ensures the class slot is the
+        //   sole source of difference, making the guidance direction clean.
+        let v_cond = Tensor::cat(&[&xt, &time_emb, class_one_hot], 1)?;
+        let v_null = Tensor::cat(&[&xt, &time_emb, &null_one_hot], 1)?;
 
-        let (pred_cond,_,_) = mlp.forward(&v_cond)?;
-        let (pred_uncond,_,_) = mlp.forward(&v_null)?;
+        // Step 4: Two forward passes — one conditional, one unconditional.
+        //
+        // WHY two passes and not one?
+        //   We need epsilon_cond and epsilon_uncond separately to compute the
+        //   guidance direction.  There is no shortcut; we must evaluate the
+        //   model twice per reverse step.
+        //
+        // Note: intermediate activations are discarded — we're at inference.
+        let (pred_cond,   _, _) = mlp.forward(&v_cond)?;
+        let (pred_uncond, _, _) = mlp.forward(&v_null)?;
 
-
+        // Step 5: Compute the CFG-modified noise prediction.
+        //
+        // Formula:
+        //   epsilon_guided = epsilon_cond + s * (epsilon_cond - epsilon_uncond)
+        //
+        // Expanded:
+        //   epsilon_guided = (1 + s) * epsilon_cond - s * epsilon_uncond
+        //
+        // WHY add rather than interpolate?
+        //   Standard linear interpolation with s in [0,1] would only go from
+        //   unconditional to conditional.  CFG *extrapolates* beyond the
+        //   conditional prediction (s > 0), which is why it can produce more
+        //   class-faithful samples than conditional sampling alone.
         let pred_noise = pred_cond.add(
-            &pred_cond.sub(&pred_uncond)?.affine(guidance_scale as f64,0.0)?
+            &pred_cond
+                .sub(&pred_uncond)?              // (epsilon_cond - epsilon_uncond)
+                .affine(guidance_scale, 0.0)?,   // * s
         )?;
 
-
-        let beta = betas[t_step];
-        let alpha = alphas[t_step];
+        // Step 6: Retrieve schedule coefficients for this timestep.
+        //   beta      = beta_t: noise variance for this step
+        //   alpha     = alpha_t = 1 - beta_t
+        //   alpha_bar = cumulative product of alpha values up to t
+        //   sigma     = sqrt(beta_t) — stochastic term std dev
+        let beta      = betas[t_step];
+        let alpha     = alphas[t_step];
         let alpha_bar = alphas_cumprod[t_step];
-        let sigma = sigmas[t_step];
+        let sigma     = sigmas[t_step];
 
+        // Step 7: Epsilon coefficient for the reverse posterior mean.
+        //   eps_coef = beta_t / sqrt(1 - alpha_bar_t)
+        //
+        // Re-scales the guided noise prediction to the correct amplitude for
+        // subtracting from x_t.
         let eps_coef = beta / (1.0 - alpha_bar).sqrt();
 
+        // Step 8: Compute the reverse posterior mean.
+        //
+        //   mean = (1 / sqrt(alpha_t)) * (x_t - eps_coef * epsilon_guided)
+        //
+        // This is the same DDPM posterior mean formula but with the
+        // CFG-modified epsilon_guided in place of the raw model output.
         let mean = xt
             .sub(&pred_noise.affine(eps_coef as f64, 0.0)?)?
             .affine((1.0 / alpha.sqrt()) as f64, 0.0)?;
-        
+
+        // Step 9: Add stochasticity for all non-final steps.
+        //
+        // WHY add noise for t > 0?
+        //   The true reverse posterior is Gaussian with variance sigma_t^2.
+        //   Adding sigma_t * z samples from this posterior correctly.
+        //
+        // WHY no noise at t = 0?
+        //   The final step outputs x_0 deterministically; noise would degrade it.
         if t_step > 0 {
+            // z ~ N(0, I): independent noise for this reverse step.
             let z = Tensor::randn(0.0f32, 1.0f32, (num_samples, img_dim), device)?;
+            // x_{t-1} = mean + sigma_t * z
             xt = mean.add(&z.affine(sigma as f64, 0.0)?)?;
         } else {
+            // Final step: output the deterministic mean as x_0.
             xt = mean;
         }
     }
-    
+
     Ok(xt)
 }
+
