@@ -2,17 +2,21 @@
 // train_diffusion.rs — DDPM (Denoising Diffusion Probabilistic Model) trainer
 // =============================================================================
 //
-// This binary implements a minimal DDPM pipeline on the MNIST digit dataset.
-// A two-layer MLP is trained to denoise images, then the trained model is used
-// to generate a fresh digit image via the reverse diffusion (sampling) process.
+// This binary implements a minimal *unconditional* DDPM pipeline on the MNIST
+// digit dataset.  A two-layer MLP is trained to predict the noise that was
+// added to a clean image, then the trained model is run in reverse to generate
+// a new digit image from pure Gaussian noise.
 //
 // Paper reference: "Denoising Diffusion Probabilistic Models" (Ho et al., 2020)
 //   https://arxiv.org/abs/2006.11239
+//
+// For the class-conditioned variant see `train_diffusion_cond.rs`.
+// Shared dataset and PNG utilities live in `src/mnist_utils.rs`.
 // =============================================================================
 
 // `bail!` lets us return early with a descriptive error string.
 // `Result` is anyhow's alias for std::result::Result<T, anyhow::Error>.
-use anyhow::{bail, Result};
+use anyhow::Result;
 
 // Candle is a lightweight ML framework (similar to PyTorch) written in Rust.
 // `DType`  — data type of tensor elements (F32, U32, …)
@@ -20,153 +24,20 @@ use anyhow::{bail, Result};
 // `Tensor` — the core n-dimensional array type
 use candle_core::{DType, Device, Tensor};
 
-// The MNIST file we download is GZIP-compressed.
-// GzDecoder streams the decompressed bytes without allocating the full archive.
-use flate2::read::GzDecoder;
-
 // Local model components for the diffusion pipeline:
-//   `get_time_embedding`  — sinusoidal positional encoding of the timestep
-//   `BetaScheduler`       — pre-computes beta/alpha/sigma schedules
-//   `MlpAdamOptimizer`    — Adam optimizer wrapper for the MLP weights
-//   `sample_ddpm`          — reverse diffusion sampler used after training
-//   `SimpleDenoisingMlp`  — two-layer MLP: input → hidden → output
+//   `get_time_embedding`    — sinusoidal positional encoding of the timestep
+//   `BetaScheduler`         — pre-computes beta/alpha/sigma schedules
+//   `MlpAdamOptimizer`      — Adam optimizer wrapper for the MLP weights
+//   `SimpleDenoisingMlp`    — two-layer MLP: input → hidden → output
+//   `sample_ddpm_from_noise`— shared reverse diffusion sampler (unconditional)
 use llm_scratch_rs::models::diffusion::{
-    get_time_embedding, sample_ddpm_from_noise, BetaScheduler, MlpAdamOptimizer, SimpleDenoisingMlp,
+    get_time_embedding, sample_ddpm_from_noise, BetaScheduler, MlpAdamOptimizer,
+    SimpleDenoisingMlp,
 };
 
-// Standard filesystem helpers used for caching the downloaded dataset.
-use std::fs::{create_dir_all, File};
-use std::io::{BufReader, Read};
-use std::path::Path;
-
-// =============================================================================
-// acquire_mnit — dataset acquisition (download + cache)
-// =============================================================================
-//
-// WHY a separate function?
-//   Keeps `main` focused on the training loop rather than data logistics.
-//   Also lets us skip the download on subsequent runs (idempotent).
-//
-// The MNIST IDX3-ubyte format stores images as raw big-endian bytes.
-// We download the GZIP-compressed version from a public GitHub mirror
-// and decompress it directly to disk.
-fn acquire_mnit(device: &Device) -> Result<Tensor> {
-    let dest_path = "mnist/MNIST/raw/train-images-idx3-ubyte";
-    let dest_dir = Path::new("mnist/MNIST/raw");
-
-    // Only download if the file is not already cached locally.
-    // This avoids re-downloading on every training run.
-    if !Path::new(dest_path).exists() {
-        println!("MNIST dataset not found locally. Preparing programmatic download...");
-
-        // Recursively create all parent directories (like `mkdir -p`).
-        create_dir_all(dest_dir)?;
-
-        // Public GZIP mirror of the original MNIST binary files.
-        // WHY this URL? The original Yann LeCun site is rate-limited; this
-        // GitHub mirror is more reliable for automated downloads.
-        let url = "https://raw.githubusercontent.com/fgnt/mnist/master/train-images-idx3-ubyte.gz";
-        println!("Downloading from: {}", url);
-
-        // Perform a synchronous (blocking) HTTP GET request.
-        // We use the blocking variant because we don't need async here.
-        let response = reqwest::blocking::get(url)?;
-
-        // Treat any non-2xx HTTP status as a hard failure — we don't want to
-        // silently write a corrupted file (e.g. a 404 HTML page) to disk.
-        if !response.status().is_success() {
-            bail!(
-                "Failed to download dataset. HTTP Status: {}",
-                response.status()
-            );
-        }
-
-        println!("Decompressing GZIP archive to {}...", dest_path);
-
-        // Wrap the HTTP response body in a GzDecoder so we decompress on-the-fly
-        // as bytes stream in, rather than buffering the entire archive in memory.
-        let mut gz_decoder = GzDecoder::new(response);
-        let mut out_file = File::create(dest_path)?;
-
-        // Stream decompressed bytes from the decoder directly into the file.
-        std::io::copy(&mut gz_decoder, &mut out_file)?;
-        println!("Download and extraction complete!");
-    }
-
-    // Delegate to the raw binary parser to produce a Candle Tensor.
-    load_mnist_images(dest_path, device)
-}
-
-// =============================================================================
-// load_mnist_images — binary IDX3 parser → Candle Tensor
-// =============================================================================
-//
-// The MNIST IDX3 format (magic number 0x0803 = 2051) has this layout:
-//
-//   Offset  | Bytes | Meaning
-//   ------  | ----- | -------
-//   0       | 4     | Magic number (big-endian u32): must be 2051
-//   4       | 4     | Number of images (big-endian u32)
-//   8       | 4     | Number of rows   (big-endian u32)  → 28
-//   12      | 4     | Number of cols   (big-endian u32)  → 28
-//   16      | N*R*C | Raw pixel bytes, one u8 per pixel, row-major
-//
-// WHY big-endian? The IDX format pre-dates modern hardware conventions.
-// Rust's `u32::from_be_bytes` handles the byte-order conversion for us.
-//
-// WHY affine(1/127.5, -1.0)?
-//   Pixel values are in [0, 255] as u8.
-//   After casting to f32 and applying x * (1/127.5) - 1.0, they land in [-1, 1].
-//   This symmetric normalisation is standard for generative models because it
-//   centres the data around zero, which stabilises training and matches the
-//   Gaussian prior used in the forward diffusion process.
-/// Parses the MNIST IDX3-ubyte binary file and returns a Tensor of shape
-/// `(num_images, 1, rows, cols)` with pixel values normalised to `[-1, 1]`.
-fn load_mnist_images(path: &str, device: &Device) -> Result<Tensor> {
-    let file = File::open(path)?;
-
-    // BufReader wraps the file with an internal read buffer so small reads
-    // (e.g. 4-byte header fields) don't each become a syscall.
-    let mut reader = BufReader::new(file);
-
-    // --- Step 1: validate the magic number -----------------------------------
-    // The magic number acts as a file-type signature.  If it's wrong, we
-    // probably opened the wrong file (e.g. the labels file) — fail loudly.
-    let mut magic = [0u8; 4];
-    reader.read_exact(&mut magic)?;
-    let magic_num = u32::from_be_bytes(magic);
-    if magic_num != 2051 {
-        bail!("Invalid magic number for MNIST images: {}", magic_num);
-    }
-
-    // --- Step 2: read the three dimension fields (num, rows, cols) -----------
-    // All three are packed contiguously so we read them in one shot (12 bytes).
-    let mut meta = [0u8; 12];
-    reader.read_exact(&mut meta)?;
-
-    let num_images = u32::from_be_bytes([meta[0], meta[1], meta[2], meta[3]]) as usize;
-    let rows = u32::from_be_bytes([meta[4], meta[5], meta[6], meta[7]]) as usize;
-    let cols = u32::from_be_bytes([meta[8], meta[9], meta[10], meta[11]]) as usize;
-    println!("Loading {} images of size {}x{}...", num_images, rows, cols);
-
-    // --- Step 3: read the raw pixel buffer -----------------------------------
-    // Total bytes = images × rows × cols.  Pixels are u8 in row-major order.
-    let mut buffer = vec![0u8; num_images * rows * cols];
-    reader.read_exact(&mut buffer)?;
-
-    // Build a Tensor, then cast and normalise:
-    //   1. from_vec  → shape (N, 1, H, W) with u8 elements
-    //   2. to_dtype  → cast to f32 so arithmetic is floating-point
-    //   3. affine    → scale by 1/127.5 and shift by -1.0  →  range [-1, 1]
-    // The channel dimension (1) is kept so the shape is compatible with
-    // standard vision convention (N, C, H, W), even though we later flatten
-    // for the MLP.
-    let tensor = Tensor::from_vec(buffer, (num_images, 1, rows, cols), device)?
-        .to_dtype(DType::F32)?
-        .affine(1.0 / 127.5, -1.0)?;
-
-    Ok(tensor)
-}
+// Shared MNIST utilities: download + cache + parse binary files, save PNGs.
+// Lives in src/utils/mnist_utils.rs so both diffusion binaries share the code.
+use llm_scratch_rs::utils::mnist_utils::{acquire_mnist_images, save_png};
 
 // =============================================================================
 // main — training loop and reverse-diffusion sampling
@@ -187,12 +58,14 @@ fn main() -> Result<()> {
     // Swap to `Device::Cuda(0)` to use the first NVIDIA GPU (requires the
     // `cuda` Candle feature flag and a CUDA-capable GPU).
     let device = Device::Cpu;
-    println!("==DDPM MNIST Model Training");
+    println!("== DDPM MNIST Model Training");
 
     // --- Dataset loading -----------------------------------------------------
-    // `acquire_mnit` handles download + caching automatically.
-    // `dataset` has shape (60000, 1, 28, 28) with pixel values in [-1, 1].
-    let dataset = acquire_mnit(&device)?;
+    // `acquire_mnist_images` handles download + caching automatically.
+    // After download it delegates to the IDX3-ubyte binary parser.
+    // `dataset` has shape (60000, 784) with pixel values in [-1, 1].
+    // WHY flattened to 784? The MLP operates on 1-D vectors, not 2-D grids.
+    let dataset = acquire_mnist_images(&device)?;
 
     // `dim(0)` returns the size of the first dimension = number of images.
     // We use this later to generate random indices into the dataset.
@@ -228,13 +101,13 @@ fn main() -> Result<()> {
     // lr               — Adam learning rate.
     //                    0.001 is the standard Adam default (Kingma & Ba 2015).
     // =========================================================================
-    let steps = 100; // T: total diffusion timesteps
-    let time_emb_dim = 16; // dimensionality of sinusoidal time encoding
-    let img_dim = 784; // 28×28 flattened image size
-    let hidden_dim = 512; // hidden layer width of the denoising MLP
-    let batch_size = 128; // mini-batch size per gradient step
-    let epochs = 20000; // total number of gradient update steps
-    let lr = 0.001; // Adam learning rate (α)
+    let steps        = 100;   // T: total diffusion timesteps
+    let time_emb_dim = 16;    // dimensionality of sinusoidal time encoding
+    let img_dim      = 784;   // 28×28 flattened image size
+    let hidden_dim   = 512;   // hidden layer width of the denoising MLP
+    let batch_size   = 128;   // mini-batch size per gradient step
+    let epochs       = 20000; // total number of gradient update steps
+    let lr           = 0.001; // Adam learning rate (α)
 
     // --- Build the beta schedule ---------------------------------------------
     // `BetaScheduler` pre-computes a *linear* beta schedule from β_1=0.0001
@@ -244,10 +117,10 @@ fn main() -> Result<()> {
     // and never change during training, so computing them once is efficient.
     //
     // Key quantities the scheduler stores:
-    //   betas         β_t  — noise variance added at each step
-    //   alphas        α_t  = 1 - β_t
-    //   alphas_cumprod ᾱ_t = ∏_{s=1}^{t} α_s  (cumulative product)
-    //   sigmas        σ_t  = sqrt(β_t)   used in the reverse process
+    //   betas          β_t  — noise variance added at each step
+    //   alphas         α_t  = 1 - β_t
+    //   alphas_cumprod ᾱ_t  = ∏_{s=1}^{t} α_s  (cumulative product)
+    //   sigmas         σ_t  = sqrt(β_t)  — used in the reverse process
     let scheduler = BetaScheduler::new(steps, 0.0001, 0.02, &device)?;
 
     // --- Build the denoising MLP ---------------------------------------------
@@ -285,7 +158,7 @@ fn main() -> Result<()> {
     // Each iteration corresponds to one mini-batch gradient update.
     // The DDPM training objective (simplified) is:
     //
-    //   L = E_{t, x_0, ε} [ || ε - ε_θ(x_t, t) ||² ]
+    //   L = E_{t, x_0, ε} [ || ε − ε_θ(x_t, t) ||² ]
     //
     // In plain English: the model ε_θ takes a noisy image x_t and a timestep t
     // and must predict the Gaussian noise ε that was added to the clean x_0.
@@ -312,12 +185,9 @@ fn main() -> Result<()> {
         )?
         .to_dtype(DType::U32)?;
 
-        // `index_select` gathers rows at the sampled indices → shape (B, 1, 28, 28).
-        // `reshape` flattens each image to a 1-D vector → shape (B, 784).
-        // This flat representation is required by the MLP.
-        let x0 = dataset
-            .index_select(&index_tensor, 0)?
-            .reshape((batch_size, img_dim))?;
+        // `index_select` gathers rows at the sampled indices → shape (B, 784).
+        // The dataset is already flat (N, 784) from `load_mnist_images`.
+        let x0 = dataset.index_select(&index_tensor, 0)?;
 
         // ---------------------------------------------------------------------
         // Step 2 — Sample a random timestep t ∈ {0, …, T-1} for each example
@@ -336,13 +206,12 @@ fn main() -> Result<()> {
         // ---------------------------------------------------------------------
         // Step 3 — Draw Gaussian noise ε and create the noisy image x_t
         // ---------------------------------------------------------------------
-        // WHY standard normal noise (mean=0, std=1)?
-        //   The DDPM forward process is defined as:
-        //     x_t = sqrt(ᾱ_t) * x_0 + sqrt(1 - ᾱ_t) * ε,  ε ~ N(0, I)
+        // The DDPM forward process is defined as:
+        //   x_t = sqrt(ᾱ_t) * x_0 + sqrt(1 - ᾱ_t) * ε,  ε ~ N(0, I)
         //
-        //   This is a *closed-form* one-shot corruption that jumps from x_0
-        //   directly to any noise level t, avoiding the need to iterate t steps.
-        //   `scheduler.add_noise` applies this formula using the pre-computed ᾱ_t.
+        // This is a *closed-form* one-shot corruption that jumps from x_0
+        // directly to any noise level t, avoiding the need to iterate t steps.
+        // `scheduler.add_noise` applies this formula using the pre-computed ᾱ_t.
         //
         // The target label for the model is precisely this noise vector ε.
         let noise = Tensor::randn(0.0f32, 1.0f32, (batch_size, img_dim), &device)?;
@@ -473,15 +342,22 @@ fn main() -> Result<()> {
         .to_vec1::<f32>()?;
     save_png("mnist_original.png", &original_sample)?;
 
-    // Generate one image by running the reusable DDPM reverse sampler.
+    // Initialise x_T as pure Gaussian noise — the starting point of the
+    // reverse diffusion chain.  Shape: (1, 784) for a single image.
     let num_samples = 1; // generate one image at a time
     let initial_noise = Tensor::randn(0.0f32, 1.0f32, (num_samples, img_dim), &device)?;
+
+    // Persist the initial pure Gaussian noise for debugging / visualisation.
     save_png(
         "mnist_noisy.png",
         &initial_noise.flatten_all()?.to_vec1::<f32>()?,
     )?;
 
-    let xt = sample_ddpm_from_noise(
+    // Run the shared unconditional reverse diffusion sampler.
+    // `sample_ddpm_from_noise` iterates t from T-1 → 0, predicting and
+    // subtracting noise at each step.  The implementation lives in
+    // `src/models/diffusion/sampling.rs`.
+    let generated = sample_ddpm_from_noise(
         &mlp,
         &scheduler,
         initial_noise,
@@ -490,59 +366,10 @@ fn main() -> Result<()> {
         &device,
     )?;
 
-    // After the loop, `xt` is x_0 — our generated image.
-    // Flatten to a 1-D slice and save as PNG.
-    let final_pixels = xt.flatten_all()?.to_vec1::<f32>()?;
+    // Flatten the generated tensor to a 1-D pixel slice and encode as PNG.
+    // `save_png` (from mnist_utils) converts [-1, 1] floats to u8 [0, 255].
+    let final_pixels = generated.flatten_all()?.to_vec1::<f32>()?;
     save_png("mnist_generated.png", &final_pixels)?;
 
-    Ok(())
-}
-
-// =============================================================================
-// save_png — convert model output tensor to a grayscale PNG file
-// =============================================================================
-//
-// Input pixel values come from the model in the range [-1, 1] (because we
-// trained with normalised data in that range).
-//
-// PNG requires u8 values in [0, 255], so we apply:
-//   pixel_u8 = round( ((val + 1.0) / 2.0).clamp(0, 1) * 255 )
-//
-// The clamp guards against out-of-range predictions (the model is not
-// constrained to output exactly [-1, 1]).
-//
-/// Writes a 28×28 grayscale image to disk as a PNG file.
-///
-/// # Arguments
-/// * `path`       — destination file path (e.g. "mnist_generated.png")
-/// * `image_flat` — 784 pixel values in the range **[-1, 1]**
-fn save_png(path: &str, image_flat: &[f32]) -> Result<()> {
-    use std::io::BufWriter;
-
-    // Create or truncate the destination file.
-    let file = File::create(path)?;
-
-    // BufWriter accumulates small writes into larger OS-level writes,
-    // which is important for the PNG encoder that writes in small chunks.
-    let ref mut w = BufWriter::new(file);
-
-    // Configure the PNG encoder: 28×28 pixels, single channel (grayscale), 8-bit.
-    let mut encoder = png::Encoder::new(w, 28, 28);
-    encoder.set_color(png::ColorType::Grayscale);
-    encoder.set_depth(png::BitDepth::Eight);
-    let mut writer = encoder.write_header()?;
-
-    // Map each f32 pixel in [-1, 1] to a u8 in [0, 255].
-    // The `clamp` call prevents artefacts if the model output slightly exceeds
-    // the training data range (which is common for diffusion model outputs).
-    let mut data = vec![0u8; 784];
-    for (i, &val) in image_flat.iter().enumerate() {
-        let norm = ((val + 1.0) / 2.0).clamp(0.0, 1.0); // map [-1,1] → [0,1]
-        data[i] = (norm * 255.0).round() as u8; // scale to [0, 255]
-    }
-
-    // Write the raw pixel bytes; the encoder handles PNG chunk framing and CRC.
-    writer.write_image_data(&data)?;
-    println!("Saved generated image as PNG to: {}", path);
     Ok(())
 }

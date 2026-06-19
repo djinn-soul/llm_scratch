@@ -16,6 +16,6 @@ pub mod time_embedding;
 
 pub use crate::common::optimizers::MlpAdamOptimizer;
 pub use denoising_mlp::{Gradients, SimpleDenoisingMlp};
-pub use sampling::{sample_ddpm, sample_ddpm_from_noise};
+pub use sampling::{sample_ddpm, sample_ddpm_cond, sample_ddpm_from_noise};
 pub use scheduler::BetaScheduler;
 pub use time_embedding::get_time_embedding;
