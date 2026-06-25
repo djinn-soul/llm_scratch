@@ -9,6 +9,7 @@
 //https://stackoverflow.com/questions/75693493/why-the-text-embedding-or-image-embedding-generated-by-clip-model-is-768-%c3%97-n/79243065#79243065
 // https://cdn.openai.com/papers/dall-e-2.pdf
 
+pub mod denoising_cnn;
 pub mod denoising_mlp;
 pub mod denoising_model;
 pub mod sampling;
@@ -16,6 +17,7 @@ pub mod scheduler;
 pub mod time_embedding;
 
 pub use crate::common::optimizers::MlpAdamOptimizer;
+pub use denoising_cnn::SimpleDenoisingCNN;
 pub use denoising_mlp::{Gradients, SimpleDenoisingMlp};
 pub use denoising_model::DenoisingModel;
 pub use sampling::{sample_ddpm, sample_ddpm_cond, sample_ddpm_from_noise};

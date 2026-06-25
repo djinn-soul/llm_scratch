@@ -1,7 +1,7 @@
 use anyhow::Result;
 use candle_core::{Device, Tensor};
 use llm_scratch_rs::models::diffusion::{
-    get_time_embedding, BetaScheduler, DenoisingModel, SimpleDenoisingMlp,
+    get_time_embedding, BetaScheduler, DenoisingModel, SimpleDenoisingCNN, SimpleDenoisingMlp,
 };
 
 #[test]
@@ -87,6 +87,53 @@ fn test_mlp_forward_backward_update() -> Result<()> {
 
     // Verify weights actually changed
     let diff = mlp
+        .w1
+        .sub(&initial_w1)?
+        .sqr()?
+        .sum_all()?
+        .to_scalar::<f32>()?;
+    assert!(diff > 0.0);
+
+    Ok(())
+}
+
+#[test]
+fn test_cnn_forward_backward_update() -> Result<()> {
+    let device = &Device::Cpu;
+    let batch_size = 4;
+    let img_dim = 16; // 4x4 image
+    let cond_dim = 6;
+    let in_dim = img_dim + cond_dim;
+
+    let mut cnn = SimpleDenoisingCNN::new(img_dim, cond_dim, device)?;
+
+    // Dummy inputs and targets
+    let v = Tensor::randn(0.0f32, 1.0f32, (batch_size, in_dim), device)?;
+    let target = Tensor::randn(0.0f32, 1.0f32, (batch_size, img_dim), device)?;
+
+    // Forward pass (through the DenoisingModel trait)
+    let (pred, intermediates) = DenoisingModel::forward(&cnn, &v)?;
+    assert_eq!(pred.dims(), &[batch_size, img_dim]);
+    assert_eq!(intermediates.len(), 3);
+
+    // Save initial weights
+    let initial_w1 = cnn.w1.clone();
+
+    // Backward pass (through the DenoisingModel trait)
+    let grads = DenoisingModel::backward(&cnn, &v, &intermediates, &pred, &target)?;
+    assert_eq!(grads.len(), 6);
+    assert_eq!(grads[0].dims(), &[img_dim, cond_dim]); // dw_cond
+    assert_eq!(grads[1].dims(), &[img_dim]); // db_cond
+    assert_eq!(grads[2].dims(), &[16, 2, 3, 3]); // dw1
+    assert_eq!(grads[3].dims(), &[16]); // db1
+    assert_eq!(grads[4].dims(), &[1, 16, 3, 3]); // dw2
+    assert_eq!(grads[5].dims(), &[1]); // db2
+
+    // Update w1 using gradient
+    cnn.w1 = cnn.w1.sub(&grads[2].affine(0.1, 0.0)?)?;
+
+    // Verify weights actually changed
+    let diff = cnn
         .w1
         .sub(&initial_w1)?
         .sqr()?
