@@ -24,9 +24,9 @@
 //
 //     ε̂_guided = ε_cond + s * (ε_cond − ε_uncond)
 //
-//   where s is the guidance_scale.  A scale of 1.0 equals standard
-//   conditional sampling; larger values (e.g. 3–10) push the output harder
-//   toward the requested class at the cost of diversity.
+//   where s is the guidance_scale.  In this implementation, s = 0.0 equals
+//   standard conditional sampling; larger values push the output harder toward
+//   the requested class at the cost of diversity.
 //
 // Paper reference: "Classifier-Free Diffusion Guidance" (Ho & Salimans, 2022)
 //   https://arxiv.org/abs/2207.12598
@@ -47,7 +47,7 @@ use llm_scratch_rs::models::diffusion::sampling::sample_ddpm_cfg;
 
 // Standard diffusion model components.
 use llm_scratch_rs::models::diffusion::{
-    get_time_embedding, BetaScheduler, DenoisingModel, MlpAdamOptimizer, SimpleDenoisingMlp,
+    get_time_embedding, BetaScheduler, DenoisingModel, MlpAdamOptimizer, SimpleDenoisingCNN,
 };
 
 // Shared MNIST download + parse helpers and PNG writer.
@@ -108,6 +108,69 @@ fn make_one_hot_cfg(labels: &[u8], drop_rate: f32, device: &Device) -> Result<Te
     Ok(Tensor::from_vec(hot, (n, num_classes), device)?)
 }
 
+fn save_cfg_sample(
+    model: &dyn DenoisingModel,
+    scheduler: &BetaScheduler,
+    target_one_hot: &Tensor,
+    guidance_scale: f64,
+    img_dim: usize,
+    time_emb_dim: usize,
+    device: &Device,
+) -> Result<()> {
+    let initial_noise = Tensor::randn(0.0f32, 1.0f32, (1, img_dim), device)?;
+    let generated = sample_ddpm_cfg(
+        model,
+        scheduler,
+        initial_noise,
+        img_dim,
+        time_emb_dim,
+        target_one_hot,
+        guidance_scale,
+        device,
+    )?;
+    let final_pixels = generated.flatten_all()?.to_vec1::<f32>()?;
+    save_png(
+        &format!("mnist_cfg_generated_s{}.png", guidance_scale as i32),
+        &final_pixels,
+    )?;
+    Ok(())
+}
+
+fn save_timestep_reconstruction(
+    model: &dyn DenoisingModel,
+    scheduler: &BetaScheduler,
+    x0: &Tensor,
+    class_one_hot: &Tensor,
+    t_step: usize,
+    img_dim: usize,
+    time_emb_dim: usize,
+    device: &Device,
+) -> Result<()> {
+    let t = Tensor::new(&[t_step as u32], device)?;
+    let noise = Tensor::randn(0.0f32, 1.0f32, (1, img_dim), device)?;
+    let xt = scheduler.add_noise(x0, &noise, &t)?;
+    let time_emb = get_time_embedding(&t, time_emb_dim)?;
+    let v = Tensor::cat(&[&xt, &time_emb, class_one_hot], 1)?;
+    let (pred_noise, _) = model.forward(&v)?;
+
+    let alpha_bar = scheduler.alphas_cumprod.to_vec1::<f32>()?[t_step];
+    let sqrt_alpha_bar = alpha_bar.sqrt() as f64;
+    let sqrt_one_minus_alpha_bar = (1.0 - alpha_bar).sqrt() as f64;
+    let reconstructed = xt
+        .sub(&pred_noise.affine(sqrt_one_minus_alpha_bar, 0.0)?)?
+        .affine(1.0 / sqrt_alpha_bar, 0.0)?;
+
+    save_png(
+        &format!("mnist_reconstruct_t{}_noisy.png", t_step),
+        &xt.flatten_all()?.to_vec1::<f32>()?,
+    )?;
+    save_png(
+        &format!("mnist_reconstruct_t{}_denoised.png", t_step),
+        &reconstructed.flatten_all()?.to_vec1::<f32>()?,
+    )?;
+    Ok(())
+}
+
 // =============================================================================
 // main — CFG training loop and guided image generation
 // =============================================================================
@@ -163,9 +226,8 @@ pub fn main() -> Result<()> {
     let time_emb_dim = 16; // sinusoidal time embedding dimension
     let class_dim = 10; // one-hot label vector size (digits 0-9)
     let img_dim = 784; // 28x28 flattened image size
-    let hidden_dim = 512; // MLP hidden layer width
     let batch_size = 128; // mini-batch size per gradient step
-    let epochs = 12000; // total gradient update steps
+    let epochs = 20000; // total gradient update steps
     let lr = 0.001; // Adam learning rate
     let label_dropout = 0.15f32; // label drop probability for CFG training
 
@@ -184,10 +246,9 @@ pub fn main() -> Result<()> {
     //   The model implicitly learns two behaviours from the same weights:
     //     - When the label slot has a 1: conditional denoising
     //     - When the label slot is all-zeros: unconditional denoising
-    let mut mlp = SimpleDenoisingMlp::new(
-        img_dim + time_emb_dim + class_dim, // 810
-        hidden_dim,                         // 512
-        img_dim,                            // 784
+    let mut mlp = SimpleDenoisingCNN::new(
+        img_dim,                  // 784
+        time_emb_dim + class_dim, // 16 + 10 = 26
         &device,
     )?;
 
@@ -334,58 +395,53 @@ pub fn main() -> Result<()> {
     //
     // The guidance scale `s` controls how strongly we push the output toward
     // the requested class:
-    //   s = 1.0  — equivalent to standard conditional sampling (no boost)
-    //   s = 3.0  — moderate guidance (good quality + class accuracy trade-off)
-    //   s = 7+   — high guidance (very class-faithful but lower diversity)
+    //   s = 0.0  — standard conditional sampling (no CFG boost)
+    //   s = 1.0  — mild CFG extrapolation
+    //   s = 3.0  — strong CFG extrapolation; often too much for a weak model
     // =========================================================================
     println!("\n=== Starting Classifier-Free Guided Reverse Sampling ===");
 
     // Choose the digit class to generate.  Change this to any value in {0..9}.
     let target_digit = 3u8;
-    // guidance_scale s = 3.0: a moderate boost that sharpens class fidelity
-    // while keeping images reasonably diverse.
-    let guidance_scale = 3.0f64;
-    println!(
-        "Generating digit: {} with guidance scale: {}",
-        target_digit, guidance_scale
-    );
-
-    let num_samples = 1; // generate one image
-
-    // x_T ~ N(0, I): pure Gaussian noise starting point for reverse diffusion.
-    let initial_noise = Tensor::randn(0.0f32, 1.0f32, (num_samples, img_dim), &device)?;
-
     // Build the one-hot conditioning vector for the target class.
     // drop_rate = 0.0: we NEVER drop the label during inference, we always
     // want the model to know which class to generate.
     let target_one_hot = make_one_hot_cfg(&[target_digit], 0.0, &device)?;
 
-    // Run the CFG-guided reverse diffusion sampler.
-    // The sampler computes both the conditional and unconditional noise
-    // predictions at every step and blends them using the guidance scale.
-    let generated = sample_ddpm_cfg(
-        &mlp,
-        &scheduler,
-        initial_noise,
-        img_dim,
-        time_emb_dim,
-        &target_one_hot,
-        guidance_scale,
-        &device,
-    )?;
-
-    // Flatten x_0 to a 1-D pixel vector and encode as PNG.
-    let final_pixels = generated.flatten_all()?.to_vec1::<f32>()?;
-    save_png("mnist_cfg_generated.png", &final_pixels)?;
+    for guidance_scale in [0.0, 1.0, 3.0] {
+        println!(
+            "Generating digit: {} with guidance scale: {}",
+            target_digit, guidance_scale
+        );
+        save_cfg_sample(
+            &mlp,
+            &scheduler,
+            &target_one_hot,
+            guidance_scale,
+            img_dim,
+            time_emb_dim,
+            &device,
+        )?;
+    }
 
     // Save a real example of the target digit for side-by-side comparison.
     // `position` finds the first index in the label list that matches.
     if let Some(pos) = labels_raw.iter().position(|&lbl| lbl == target_digit) {
-        let original_sample = images
-            .index_select(&Tensor::new(&[pos as u32], &device)?, 0)?
-            .flatten_all()?
-            .to_vec1::<f32>()?;
+        let original_tensor = images.index_select(&Tensor::new(&[pos as u32], &device)?, 0)?;
+        let original_sample = original_tensor.flatten_all()?.to_vec1::<f32>()?;
         save_png("mnist_original_3.png", &original_sample)?;
+
+        println!("Reconstructing real digit {} from t=50 noise", target_digit);
+        save_timestep_reconstruction(
+            &mlp,
+            &scheduler,
+            &original_tensor,
+            &target_one_hot,
+            50,
+            img_dim,
+            time_emb_dim,
+            &device,
+        )?;
     }
 
     Ok(())
