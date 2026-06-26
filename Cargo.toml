@@ -7,13 +7,14 @@ edition = "2021"
 path = "src/lib.rs"
 
 [dependencies]
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
-regex-lite = "0.1"
+regex-lite = "0.1.9"
 reqwest = { version = "0.13.4", features = ["blocking"] }
-flate2 = "1.0"
+flate2 = "1.1.9"
 png = "0.18.1"
 rand = "0.10.1"
+rayon = "1.12.0"
 
 # Candle ML framework — tensor ops and weight loading
 candle-core = "0.10"
@@ -23,6 +24,10 @@ hf-hub = { version = "0.5.0", features = ["tokio"] }
 # HuggingFace tokenizers — official GPT-2 BPE tokenizer (tiktoken-compatible)
 tokenizers = "0.23.1"
 # Error handling convenience
-anyhow = "1.0"
+anyhow = "1.0.103"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros"] }
-mimalloc = "0.1.43"
+mimalloc = "0.1.52"
+
+[features]
+cuda = ["candle-core/cuda", "candle-nn/cuda"]
+mkl = ["candle-core/mkl", "candle-nn/mkl"]

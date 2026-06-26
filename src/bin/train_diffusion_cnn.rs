@@ -205,8 +205,15 @@ fn make_one_hot_cfg(labels: &[u8], drop_rate: f32, device: &Device) -> Result<Te
 // =============================================================================
 pub fn main() -> Result<()> {
     // --- Device selection ----------------------------------------------------
-    // CPU for broad compatibility.  Replace with Device::Cuda(0) to use GPU.
-    let device = Device::Cpu;
+    // Automatically selects CUDA GPU if available, otherwise defaults to CPU.
+    let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
+    println!("Active Device: {:?}", device);
+
+    let batch_size = match device {
+        Device::Cuda(_) => 256,
+        _ => 128,
+    };
+    println!("Selected Batch Size: {}", batch_size);
 
     // =========================================================================
     // Hyper-parameter configuration
@@ -242,7 +249,6 @@ pub fn main() -> Result<()> {
     // =========================================================================
     let epochs        = 20000;
     let lr            = 0.001f64;
-    let batch_size    = 128;
     let img_dim       = 784;   // 28×28 pixels, flattened
     let class_dim     = 10;    // number of MNIST digit classes
     let time_emb_dim  = 16;    // sinusoidal time embedding size
@@ -299,6 +305,8 @@ pub fn main() -> Result<()> {
     let mut optimizer = MlpAdamOptimizer::new(&cnn, lr)?;
 
     println!("Starting CNN training for {} epochs...\n", epochs);
+
+    let start_time = std::time::Instant::now();
 
     // =========================================================================
     // Training loop — CFG noise prediction with label dropout
@@ -441,6 +449,9 @@ pub fn main() -> Result<()> {
         //   Printing every step would flood the terminal and add measurable
         //   overhead (~microseconds per print × 20000 steps).
         if epoch % 100 == 0 || epoch == 1 {
+            let elapsed = start_time.elapsed().as_secs_f32();
+            let speed = epoch as f32 / elapsed;
+
             // `param_names()` returns ["w_cond", "b_cond", "w1", "b1", "w2", "b2"].
             let param_names = cnn.param_names();
 
@@ -458,10 +469,12 @@ pub fn main() -> Result<()> {
                 .collect();
 
             println!(
-                "Epoch {:5}/{} - MSE Loss: {:.6} | {}",
+                "Epoch {:5}/{} - MSE Loss: {:.6} | Speed: {:.1} steps/s | Elapsed: {:.1}s | {}",
                 epoch,
                 epochs,
                 loss,
+                speed,
+                elapsed,
                 norms_str.join(", ")
             );
         }

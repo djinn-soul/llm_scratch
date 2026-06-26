@@ -333,12 +333,20 @@ The current transformer demo checks that one block preserves shape:
     - [ ] 27.3 Implement adversarial minimax training loop
     - [ ] 27.4 Implement training stabilizers (e.g., Wasserstein GAN, Gradient Penalty)
     - [ ] 27.5 Generate images and plot loss/discriminator accuracy
-- [ ] 28. Diffusion Models (Stable Diffusion)
-    - [ ] 28.1 Implement forward diffusion process (noise scheduler)
-    - [ ] 28.2 Implement reverse diffusion denoising process
-    - [ ] 28.3 Implement U-Net architecture with cross-attention
-    - [ ] 28.4 Train a simple DDPM model on 2D coordinates/shapes
-    - [ ] 28.5 Integrate classifier-free guidance
+- [/] 28. Diffusion Models (Stable Diffusion)
+    - [x] 28.1 Implement forward diffusion process (noise scheduler)
+    - [x] 28.2 Implement reverse diffusion denoising process
+    - [x] 28.3 Implement MLP denoiser (baseline)
+    - [x] 28.4 Implement CNN denoiser (2-layer, 3×3 kernels)
+    - [x] 28.5 Implement CNN denoiser (5-layer, 5×5 kernels)
+    - [x] 28.6 Train DDPM on MNIST (28×28 image generation)
+    - [x] 28.7 Integrate classifier-free guidance (CFG)
+    - [ ] 28.8 Implement DDIM sampler (deterministic reverse diffusion, fewer steps)
+    - [ ] 28.9 Implement cosine noise schedule (Nichol & Dhariwal, 2021)
+    - [ ] 28.10 Implement U-Net architecture (encoder-decoder + skip connections)
+    - [ ] 28.11 Add attention layers in U-Net bottleneck
+    - [ ] 28.12 Implement DiT (Diffusion Transformer) denoiser
+    - [ ] 28.13 Implement latent diffusion (VAE encoder → diffuse in latent space → decode)
 - [ ] 28b. RAG & Vector Databases
     - [ ] 28b.1 Implement similarity search functions (Cosine, Dot Product)
     - [ ] 28b.2 Implement a basic HNSW (Hierarchical Navigable Small World) index builder
