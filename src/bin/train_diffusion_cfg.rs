@@ -183,10 +183,12 @@ fn save_timestep_reconstruction(
 //   5. Save generated + reference PNGs.
 // =============================================================================
 pub fn main() -> Result<()> {
-    // --- Device selection ----------------------------------------------------
-    // CPU for portability. Swap to Device::Cuda(0) for GPU acceleration.
-    let device = Device::Cpu;
+    // --- Device auto-selection ------------------------------------------------
+    // Attempt to use CUDA GPU 0; fall back silently to CPU if unavailable.
+    // Requires the `cuda` Cargo feature flag (`cargo run --features cuda`).
+    let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
     println!("== Classifier-Free Guidance (CFG) DDPM Training ==");
+    println!("Active Device: {:?}", device);
 
     // --- Dataset loading -----------------------------------------------------
     // Both images and labels are required:
@@ -226,7 +228,10 @@ pub fn main() -> Result<()> {
     let time_emb_dim = 16; // sinusoidal time embedding dimension
     let class_dim = 10; // one-hot label vector size (digits 0-9)
     let img_dim = 784; // 28x28 flattened image size
-    let batch_size = 128; // mini-batch size per gradient step
+    let batch_size = match device {
+        Device::Cuda(_) => 256, // CUDA: larger batch → better GPU utilisation
+        _               => 128, // CPU: smaller batch → fits in RAM
+    };
     let epochs = 20000; // total gradient update steps
     let lr = 0.001; // Adam learning rate
     let label_dropout = 0.15f32; // label drop probability for CFG training

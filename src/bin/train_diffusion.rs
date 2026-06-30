@@ -53,12 +53,12 @@ use llm_scratch_rs::utils::mnist_utils::{acquire_mnist_images, save_png};
 
 // Entry point: orchestrates training & sampling for the DDPM pipeline.
 fn main() -> Result<()> {
-    // --- Device selection ----------------------------------------------------
-    // `Device::Cpu` runs all tensor ops on the CPU.
-    // Swap to `Device::Cuda(0)` to use the first NVIDIA GPU (requires the
-    // `cuda` Candle feature flag and a CUDA-capable GPU).
-    let device = Device::Cpu;
+    // --- Device auto-selection ------------------------------------------------
+    // Attempt to use CUDA GPU 0; fall back silently to CPU if unavailable.
+    // Requires the `cuda` Cargo feature flag (`cargo run --features cuda`).
+    let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
     println!("== DDPM MNIST Model Training");
+    println!("Active Device: {:?}", device);
 
     // --- Dataset loading -----------------------------------------------------
     // `acquire_mnist_images` handles download + caching automatically.
@@ -105,7 +105,10 @@ fn main() -> Result<()> {
     let time_emb_dim = 16; // dimensionality of sinusoidal time encoding
     let img_dim = 784; // 28×28 flattened image size
     let hidden_dim = 512; // hidden layer width of the denoising MLP
-    let batch_size = 128; // mini-batch size per gradient step
+    let batch_size = match device {
+        Device::Cuda(_) => 256, // CUDA: larger batch → better GPU utilisation
+        _               => 128, // CPU: smaller batch → fits in RAM
+    };
     let epochs = 20000; // total number of gradient update steps
     let lr = 0.001; // Adam learning rate (α)
 

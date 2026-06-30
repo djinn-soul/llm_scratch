@@ -54,7 +54,7 @@ use llm_scratch_rs::models::diffusion::{
 //   → all shape (steps,)
 #[test]
 fn test_beta_scheduler() -> Result<()> {
-    let device = &Device::Cpu;
+    let device = &Device::new_cuda(0).unwrap_or(Device::Cpu);
     let steps = 100;
     let scheduler = BetaScheduler::new(steps, 1e-4, 0.02, device)?;
 
@@ -96,7 +96,7 @@ fn test_beta_scheduler() -> Result<()> {
 //   runtime error.  This test catches embedding-dimension mismatches early.
 #[test]
 fn test_time_embedding() -> Result<()> {
-    let device = &Device::Cpu;
+    let device = &Device::new_cuda(0).unwrap_or(Device::Cpu);
     let t      = Tensor::new(&[0u32, 5, 20], device)?;
     let emb_dim = 16;
     let emb    = get_time_embedding(&t, emb_dim)?;
@@ -125,7 +125,7 @@ fn test_time_embedding() -> Result<()> {
 //   confirms that the backward pass produces non-trivial gradients.
 #[test]
 fn test_mlp_forward_backward_update() -> Result<()> {
-    let device    = &Device::Cpu;
+    let device    = &Device::new_cuda(0).unwrap_or(Device::Cpu);
     let batch_size = 4;
     let in_dim    = 18; // 2 (2-D coordinate) + 16 (time embedding)
     let hidden_dim = 32;
@@ -204,7 +204,7 @@ fn test_mlp_forward_backward_update() -> Result<()> {
 //   [5] db2:     (1,)            — Conv2 bias gradient
 #[test]
 fn test_cnn_forward_backward_update() -> Result<()> {
-    let device     = &Device::Cpu;
+    let device     = &Device::new_cuda(0).unwrap_or(Device::Cpu);
     let batch_size = 4;
     let img_dim    = 16; // 4×4 image
     let cond_dim   = 6;
@@ -290,7 +290,7 @@ fn test_cnn_forward_backward_update() -> Result<()> {
 // (64/128) when they become stable.
 #[test]
 fn test_cnn_5layers_forward_backward_update() -> Result<()> {
-    let device     = &Device::Cpu;
+    let device     = &Device::new_cuda(0).unwrap_or(Device::Cpu);
     let batch_size = 4;
     let img_dim    = 16; // 4×4 image — small for fast testing
     let cond_dim   = 6;

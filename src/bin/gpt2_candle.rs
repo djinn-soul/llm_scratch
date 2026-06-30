@@ -25,7 +25,8 @@ fn main() -> Result<()> {
     let tokenizer = Tokenizer::from_file(tokenizer_file).map_err(anyhow::Error::msg)?;
 
     println!("Mapping weights into memory...");
-    let device = candle_core::Device::Cpu;
+    let device = candle_core::Device::new_cuda(0).unwrap_or(candle_core::Device::Cpu);
+    println!("Active Device: {:?}", device);
     let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[model_file], DType::F32, &device)? };
 
     println!("Initializing model...");

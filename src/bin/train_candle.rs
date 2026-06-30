@@ -52,9 +52,11 @@ fn calc_loss_loader(
 
 pub fn main() -> Result<()> {
     // ── PHASE 1: CANDLE DEVICE + TRAINABLE PARAMETER STORE ────────────────
-    // `Device::Cpu` keeps the example portable. `VarMap` owns trainable tensors;
-    // `VarBuilder` gives model constructors named access into that map.
-    let device = Device::Cpu;
+    // Attempt CUDA GPU 0 first; fall back to CPU if unavailable.
+    // `VarMap` owns trainable tensors; `VarBuilder` gives model constructors
+    // named access into that map.
+    let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
+    println!("Active Device: {:?}", device);
     let mut varmap = VarMap::new();
 
     // Create a VarBuilder that registers all weights inside varmap

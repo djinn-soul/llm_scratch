@@ -81,7 +81,7 @@ fn test_candle_kv_cache_equivalence() {
     use candle_nn::{VarBuilder, VarMap};
     use llm_scratch_rs::models::gpt2_candle::{Gpt2Config, Gpt2Model};
 
-    let device = Device::Cpu;
+    let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
     let varmap = VarMap::new();
     let vs = VarBuilder::from_varmap(&varmap, DType::F32, &device);
     let cfg = Gpt2Config::gpt2_mini();

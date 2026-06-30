@@ -55,12 +55,12 @@ use llm_scratch_rs::utils::mnist_utils::{acquire_mnist, make_one_hot, save_png};
 //   5. Save the generated image as PNG.
 // =============================================================================
 fn main() -> Result<()> {
-    // --- Device selection ----------------------------------------------------
-    // `Device::Cpu` runs every tensor op on the host CPU.
-    // Swap to `Device::Cuda(0)` for GPU training (requires the Candle `cuda`
-    // feature and a compatible NVIDIA GPU).
-    let device = Device::Cpu;
+    // --- Device auto-selection ------------------------------------------------
+    // Attempt to use CUDA GPU 0; fall back silently to CPU if unavailable.
+    // Requires the `cuda` Cargo feature flag (`cargo run --features cuda`).
+    let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
     println!("== Class-Conditioned DDPM MNIST Model Training");
+    println!("Active Device: {:?}", device);
 
     // --- Dataset loading -----------------------------------------------------
     // `acquire_mnist` downloads and caches both the image and label binary files.
@@ -108,7 +108,10 @@ fn main() -> Result<()> {
     let class_dim = 10; // one-hot label dimension (digits 0–9)
     let img_dim = 784; // 28×28 flattened image size
     let hidden_dim = 512; // hidden layer width
-    let batch_size = 128; // mini-batch size per gradient step
+    let batch_size = match device {
+        Device::Cuda(_) => 256, // CUDA: larger batch → better GPU utilisation
+        _               => 128, // CPU: smaller batch → fits in RAM
+    };
     let epochs = 8000; // total gradient update steps
     let lr = 0.001; // Adam learning rate (α)
 
