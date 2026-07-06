@@ -27,13 +27,8 @@
 use anyhow::Result;
 use candle_core::{Device, Tensor};
 use llm_scratch_rs::models::diffusion::{
-    get_time_embedding,
-    BetaScheduler,
-    DenoisingModel,
-    SimpleDenoisingCNN,
-    SimpleDenoisingCNN5Layers,
-    SimpleDenoisingMlp,
-    SimpleDenoisingUNet,
+    get_time_embedding, BetaScheduler, DenoisingModel, SimpleDenoisingCNN,
+    SimpleDenoisingCNN5Layers, SimpleDenoisingMlp, SimpleDenoisingUNet,
 };
 
 // =============================================================================
@@ -72,7 +67,7 @@ fn test_beta_scheduler() -> Result<()> {
     // Verify forward diffusion x_t = sqrt(ᾱ_t)*x_0 + sqrt(1-ᾱ_t)*ε
     // produces output of the same shape as the input.
     let batch_size = 8;
-    let x0    = Tensor::randn(0.0f32, 1.0f32, (batch_size, 2), device)?;
+    let x0 = Tensor::randn(0.0f32, 1.0f32, (batch_size, 2), device)?;
     let noise = Tensor::randn(0.0f32, 1.0f32, (batch_size, 2), device)?;
     // Use a diverse set of timesteps to exercise different schedule positions.
     let t = Tensor::new(&[0u32, 1, 10, 20, 50, 80, 90, 99], device)?;
@@ -98,9 +93,9 @@ fn test_beta_scheduler() -> Result<()> {
 #[test]
 fn test_time_embedding() -> Result<()> {
     let device = &Device::new_cuda(0).unwrap_or(Device::Cpu);
-    let t      = Tensor::new(&[0u32, 5, 20], device)?;
+    let t = Tensor::new(&[0u32, 5, 20], device)?;
     let emb_dim = 16;
-    let emb    = get_time_embedding(&t, emb_dim)?;
+    let emb = get_time_embedding(&t, emb_dim)?;
 
     // Output shape: (batch=3, emb_dim=16)
     assert_eq!(emb.dims(), &[3, emb_dim]);
@@ -126,16 +121,16 @@ fn test_time_embedding() -> Result<()> {
 //   confirms that the backward pass produces non-trivial gradients.
 #[test]
 fn test_mlp_forward_backward_update() -> Result<()> {
-    let device    = &Device::new_cuda(0).unwrap_or(Device::Cpu);
+    let device = &Device::new_cuda(0).unwrap_or(Device::Cpu);
     let batch_size = 4;
-    let in_dim    = 18; // 2 (2-D coordinate) + 16 (time embedding)
+    let in_dim = 18; // 2 (2-D coordinate) + 16 (time embedding)
     let hidden_dim = 32;
-    let out_dim   = 2;
+    let out_dim = 2;
 
     let mut mlp = SimpleDenoisingMlp::new(in_dim, hidden_dim, out_dim, device)?;
 
     // Dummy input and target noise tensors.
-    let v      = Tensor::randn(0.0f32, 1.0f32, (batch_size, in_dim), device)?;
+    let v = Tensor::randn(0.0f32, 1.0f32, (batch_size, in_dim), device)?;
     let target = Tensor::randn(0.0f32, 1.0f32, (batch_size, out_dim), device)?;
 
     // --- Forward pass -------------------------------------------------------
@@ -154,10 +149,10 @@ fn test_mlp_forward_backward_update() -> Result<()> {
     // Returns 4 gradient tensors: [dw1, db1, dw2, db2].
     let grads = DenoisingModel::backward(&mlp, &v, &intermediates, &pred, &target)?;
     assert_eq!(grads.len(), 4);
-    assert_eq!(grads[0].dims(), &[hidden_dim, in_dim]);     // dw1
-    assert_eq!(grads[1].dims(), &[hidden_dim]);             // db1
-    assert_eq!(grads[2].dims(), &[out_dim, hidden_dim]);    // dw2
-    assert_eq!(grads[3].dims(), &[out_dim]);                // db2
+    assert_eq!(grads[0].dims(), &[hidden_dim, in_dim]); // dw1
+    assert_eq!(grads[1].dims(), &[hidden_dim]); // db1
+    assert_eq!(grads[2].dims(), &[out_dim, hidden_dim]); // dw2
+    assert_eq!(grads[3].dims(), &[out_dim]); // db2
 
     // --- Weight update (via legacy concrete method) -------------------------
     // The MLP also exposes a concrete `update` method for backward compatibility
@@ -177,7 +172,10 @@ fn test_mlp_forward_backward_update() -> Result<()> {
         .sqr()?
         .sum_all()?
         .to_scalar::<f32>()?;
-    assert!(diff > 0.0, "w1 did not change after update — gradient may be zero");
+    assert!(
+        diff > 0.0,
+        "w1 did not change after update — gradient may be zero"
+    );
 
     Ok(())
 }
@@ -205,15 +203,15 @@ fn test_mlp_forward_backward_update() -> Result<()> {
 //   [5] db2:     (1,)            — Conv2 bias gradient
 #[test]
 fn test_cnn_forward_backward_update() -> Result<()> {
-    let device     = &Device::new_cuda(0).unwrap_or(Device::Cpu);
+    let device = &Device::new_cuda(0).unwrap_or(Device::Cpu);
     let batch_size = 4;
-    let img_dim    = 16; // 4×4 image
-    let cond_dim   = 6;
-    let in_dim     = img_dim + cond_dim;
+    let img_dim = 16; // 4×4 image
+    let cond_dim = 6;
+    let in_dim = img_dim + cond_dim;
 
     let mut cnn = SimpleDenoisingCNN::new(img_dim, cond_dim, device)?;
 
-    let v      = Tensor::randn(0.0f32, 1.0f32, (batch_size, in_dim), device)?;
+    let v = Tensor::randn(0.0f32, 1.0f32, (batch_size, in_dim), device)?;
     let target = Tensor::randn(0.0f32, 1.0f32, (batch_size, img_dim), device)?;
 
     // --- Forward pass -------------------------------------------------------
@@ -228,11 +226,11 @@ fn test_cnn_forward_backward_update() -> Result<()> {
     let grads = DenoisingModel::backward(&cnn, &v, &intermediates, &pred, &target)?;
     assert_eq!(grads.len(), 6);
     assert_eq!(grads[0].dims(), &[img_dim, cond_dim]); // dw_cond
-    assert_eq!(grads[1].dims(), &[img_dim]);            // db_cond
-    assert_eq!(grads[2].dims(), &[16, 2, 3, 3]);        // dw1
-    assert_eq!(grads[3].dims(), &[16]);                 // db1
-    assert_eq!(grads[4].dims(), &[1, 16, 3, 3]);        // dw2
-    assert_eq!(grads[5].dims(), &[1]);                  // db2
+    assert_eq!(grads[1].dims(), &[img_dim]); // db_cond
+    assert_eq!(grads[2].dims(), &[16, 2, 3, 3]); // dw1
+    assert_eq!(grads[3].dims(), &[16]); // db1
+    assert_eq!(grads[4].dims(), &[1, 16, 3, 3]); // dw2
+    assert_eq!(grads[5].dims(), &[1]); // db2
 
     // --- Manual weight update (SGD step with lr=0.1) -----------------------
     cnn.w1 = cnn.w1.sub(&grads[2].affine(0.1, 0.0)?)?;
@@ -291,15 +289,15 @@ fn test_cnn_forward_backward_update() -> Result<()> {
 // (64/128) when they become stable.
 #[test]
 fn test_cnn_5layers_forward_backward_update() -> Result<()> {
-    let device     = &Device::new_cuda(0).unwrap_or(Device::Cpu);
+    let device = &Device::new_cuda(0).unwrap_or(Device::Cpu);
     let batch_size = 4;
-    let img_dim    = 16; // 4×4 image — small for fast testing
-    let cond_dim   = 6;
-    let in_dim     = img_dim + cond_dim;
+    let img_dim = 16; // 4×4 image — small for fast testing
+    let cond_dim = 6;
+    let in_dim = img_dim + cond_dim;
 
     let mut cnn = SimpleDenoisingCNN5Layers::new(img_dim, cond_dim, device)?;
 
-    let v      = Tensor::randn(0.0f32, 1.0f32, (batch_size, in_dim), device)?;
+    let v = Tensor::randn(0.0f32, 1.0f32, (batch_size, in_dim), device)?;
     let target = Tensor::randn(0.0f32, 1.0f32, (batch_size, img_dim), device)?;
 
     // --- Forward pass -------------------------------------------------------
@@ -314,18 +312,18 @@ fn test_cnn_5layers_forward_backward_update() -> Result<()> {
     // 12 gradient tensors: one weight + one bias per parameter group.
     let grads = DenoisingModel::backward(&cnn, &v, &intermediates, &pred, &target)?;
     assert_eq!(grads.len(), 12);
-    assert_eq!(grads[0].dims(),  &[img_dim, cond_dim]); // dw_cond
-    assert_eq!(grads[1].dims(),  &[img_dim]);            // db_cond
-    assert_eq!(grads[2].dims(),  &[16, 2, 5, 5]);        // dw1
-    assert_eq!(grads[3].dims(),  &[16]);                 // db1
-    assert_eq!(grads[4].dims(),  &[32, 16, 5, 5]);       // dw2
-    assert_eq!(grads[5].dims(),  &[32]);                 // db2
-    assert_eq!(grads[6].dims(),  &[32, 32, 5, 5]);       // dw3
-    assert_eq!(grads[7].dims(),  &[32]);                 // db3
-    assert_eq!(grads[8].dims(),  &[16, 32, 5, 5]);       // dw4
-    assert_eq!(grads[9].dims(),  &[16]);                 // db4
-    assert_eq!(grads[10].dims(), &[1, 16, 5, 5]);        // dw5
-    assert_eq!(grads[11].dims(), &[1]);                  // db5
+    assert_eq!(grads[0].dims(), &[img_dim, cond_dim]); // dw_cond
+    assert_eq!(grads[1].dims(), &[img_dim]); // db_cond
+    assert_eq!(grads[2].dims(), &[16, 2, 5, 5]); // dw1
+    assert_eq!(grads[3].dims(), &[16]); // db1
+    assert_eq!(grads[4].dims(), &[32, 16, 5, 5]); // dw2
+    assert_eq!(grads[5].dims(), &[32]); // db2
+    assert_eq!(grads[6].dims(), &[32, 32, 5, 5]); // dw3
+    assert_eq!(grads[7].dims(), &[32]); // db3
+    assert_eq!(grads[8].dims(), &[16, 32, 5, 5]); // dw4
+    assert_eq!(grads[9].dims(), &[16]); // db4
+    assert_eq!(grads[10].dims(), &[1, 16, 5, 5]); // dw5
+    assert_eq!(grads[11].dims(), &[1]); // db5
 
     // --- Manual weight update (SGD step with lr=0.1) -----------------------
     cnn.w1 = cnn.w1.sub(&grads[2].affine(0.1, 0.0)?)?;
@@ -352,15 +350,15 @@ fn test_cnn_5layers_forward_backward_update() -> Result<()> {
 //   3. SGD step update verification.
 #[test]
 fn test_unet_forward_backward_update() -> Result<()> {
-    let device     = &Device::Cpu;
+    let device = &Device::Cpu;
     let batch_size = 4;
-    let img_dim    = 16; // 4×4 image (h_down=2)
-    let cond_dim   = 6;
-    let in_dim     = img_dim + cond_dim;
+    let img_dim = 16; // 4×4 image (h_down=2)
+    let cond_dim = 6;
+    let in_dim = img_dim + cond_dim;
 
     let mut unet = SimpleDenoisingUNet::new(img_dim, cond_dim, device)?;
 
-    let v      = Tensor::randn(0.0f32, 1.0f32, (batch_size, in_dim), device)?;
+    let v = Tensor::randn(0.0f32, 1.0f32, (batch_size, in_dim), device)?;
     let target = Tensor::randn(0.0f32, 1.0f32, (batch_size, img_dim), device)?;
 
     // --- Forward pass ---
@@ -375,17 +373,17 @@ fn test_unet_forward_backward_update() -> Result<()> {
     let grads = DenoisingModel::backward(&unet, &v, &intermediates, &pred, &target)?;
     assert_eq!(grads.len(), 12);
     assert_eq!(grads[0].dims(), &[img_dim, cond_dim]); // dw_cond
-    assert_eq!(grads[1].dims(), &[img_dim]);            // db_cond
-    assert_eq!(grads[2].dims(), &[16, 2, 3, 3]);        // dw1
-    assert_eq!(grads[3].dims(), &[16]);                 // db1
-    assert_eq!(grads[4].dims(), &[32, 16, 3, 3]);       // dw2
-    assert_eq!(grads[5].dims(), &[32]);                 // db2
-    assert_eq!(grads[6].dims(), &[32, 32, 3, 3]);       // dw3
-    assert_eq!(grads[7].dims(), &[32]);                 // db3
-    assert_eq!(grads[8].dims(), &[16, 48, 3, 3]);       // dw4
-    assert_eq!(grads[9].dims(), &[16]);                 // db4
-    assert_eq!(grads[10].dims(), &[1, 16, 3, 3]);       // dw5
-    assert_eq!(grads[11].dims(), &[1]);                 // db5
+    assert_eq!(grads[1].dims(), &[img_dim]); // db_cond
+    assert_eq!(grads[2].dims(), &[16, 2, 3, 3]); // dw1
+    assert_eq!(grads[3].dims(), &[16]); // db1
+    assert_eq!(grads[4].dims(), &[32, 16, 3, 3]); // dw2
+    assert_eq!(grads[5].dims(), &[32]); // db2
+    assert_eq!(grads[6].dims(), &[32, 32, 3, 3]); // dw3
+    assert_eq!(grads[7].dims(), &[32]); // db3
+    assert_eq!(grads[8].dims(), &[16, 48, 3, 3]); // dw4
+    assert_eq!(grads[9].dims(), &[16]); // db4
+    assert_eq!(grads[10].dims(), &[1, 16, 3, 3]); // dw5
+    assert_eq!(grads[11].dims(), &[1]); // db5
 
     // --- Update step ---
     unet.w1 = unet.w1.sub(&grads[2].affine(0.1, 0.0)?)?;

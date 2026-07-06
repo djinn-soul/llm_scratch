@@ -28,6 +28,20 @@ pub struct SimpleDenoisingUNet {
 
 impl SimpleDenoisingUNet {
     pub fn new(img_dim: usize, cond_dim: usize, device: &Device) -> Result<Self> {
+        let h = (img_dim as f64).sqrt() as usize;
+        if h * h != img_dim {
+            bail!(
+                "SimpleDenoisingUNet expected img_dim to be a square image area, got {}",
+                img_dim
+            );
+        }
+        if h % 2 != 0 {
+            bail!(
+                "SimpleDenoisingUNet expected an even image side length for 2x2 pooling, got {}",
+                h
+            );
+        }
+
         let scale_cond = (2.0f64 / cond_dim as f64).sqrt();
         let w_cond = (Tensor::randn(0.0f32, 1.0f32, (img_dim, cond_dim), device)? * scale_cond)?;
         let b_cond = Tensor::zeros(img_dim, DType::F32, device)?;

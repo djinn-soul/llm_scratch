@@ -330,13 +330,40 @@ pub fn sample_ddpm_cond(
 pub fn sample_ddpm_cfg(
     model: &dyn DenoisingModel,
     scheduler: &BetaScheduler,
-    mut xt: Tensor,
+    xt: Tensor,
     img_dim: usize,
     time_emb_dim: usize,
     class_one_hot: &Tensor,
     guidance_scale: f64,
     device: &Device,
 ) -> Result<Tensor> {
+    sample_ddpm_cfg_with_callback(
+        model,
+        scheduler,
+        xt,
+        img_dim,
+        time_emb_dim,
+        class_one_hot,
+        guidance_scale,
+        device,
+        |_, _| Ok(()),
+    )
+}
+
+pub fn sample_ddpm_cfg_with_callback<F>(
+    model: &dyn DenoisingModel,
+    scheduler: &BetaScheduler,
+    mut xt: Tensor,
+    img_dim: usize,
+    time_emb_dim: usize,
+    class_one_hot: &Tensor,
+    guidance_scale: f64,
+    device: &Device,
+    mut on_step: F,
+) -> Result<Tensor>
+where
+    F: FnMut(usize, &Tensor) -> Result<()>,
+{
     let num_samples = xt.dim(0)?;
 
     // Pre-extract schedule coefficients into plain Vecs for O(1) indexed access.
@@ -454,6 +481,9 @@ pub fn sample_ddpm_cfg(
             // Final step: output the deterministic mean as x_0.
             xt = mean;
         }
+
+        let frame_idx = scheduler.steps - 1 - t_step;
+        on_step(frame_idx, &xt)?;
     }
 
     Ok(xt)
