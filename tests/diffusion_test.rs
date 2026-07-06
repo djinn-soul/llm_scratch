@@ -33,6 +33,7 @@ use llm_scratch_rs::models::diffusion::{
     SimpleDenoisingCNN,
     SimpleDenoisingCNN5Layers,
     SimpleDenoisingMlp,
+    SimpleDenoisingUNet,
 };
 
 // =============================================================================
@@ -337,6 +338,66 @@ fn test_cnn_5layers_forward_backward_update() -> Result<()> {
         .sum_all()?
         .to_scalar::<f32>()?;
     assert!(diff > 0.0, "w1 did not change — dw1 may be all zeros");
+
+    Ok(())
+}
+
+// =============================================================================
+// test_unet_forward_backward_update
+// =============================================================================
+//
+// End-to-end shape and update test for SimpleDenoisingUNet:
+//   1. Forward: verify output (B, img_dim) and 12 cached intermediate tensors.
+//   2. Backward: verify 12 gradient tensors matching parameter shapes.
+//   3. SGD step update verification.
+#[test]
+fn test_unet_forward_backward_update() -> Result<()> {
+    let device     = &Device::Cpu;
+    let batch_size = 4;
+    let img_dim    = 16; // 4×4 image (h_down=2)
+    let cond_dim   = 6;
+    let in_dim     = img_dim + cond_dim;
+
+    let mut unet = SimpleDenoisingUNet::new(img_dim, cond_dim, device)?;
+
+    let v      = Tensor::randn(0.0f32, 1.0f32, (batch_size, in_dim), device)?;
+    let target = Tensor::randn(0.0f32, 1.0f32, (batch_size, img_dim), device)?;
+
+    // --- Forward pass ---
+    // 12 intermediates cached
+    let (pred, intermediates) = DenoisingModel::forward(&unet, &v)?;
+    assert_eq!(pred.dims(), &[batch_size, img_dim]);
+    assert_eq!(intermediates.len(), 12);
+
+    let initial_w1 = unet.w1.clone();
+
+    // --- Backward pass ---
+    let grads = DenoisingModel::backward(&unet, &v, &intermediates, &pred, &target)?;
+    assert_eq!(grads.len(), 12);
+    assert_eq!(grads[0].dims(), &[img_dim, cond_dim]); // dw_cond
+    assert_eq!(grads[1].dims(), &[img_dim]);            // db_cond
+    assert_eq!(grads[2].dims(), &[16, 2, 3, 3]);        // dw1
+    assert_eq!(grads[3].dims(), &[16]);                 // db1
+    assert_eq!(grads[4].dims(), &[32, 16, 3, 3]);       // dw2
+    assert_eq!(grads[5].dims(), &[32]);                 // db2
+    assert_eq!(grads[6].dims(), &[32, 32, 3, 3]);       // dw3
+    assert_eq!(grads[7].dims(), &[32]);                 // db3
+    assert_eq!(grads[8].dims(), &[16, 48, 3, 3]);       // dw4
+    assert_eq!(grads[9].dims(), &[16]);                 // db4
+    assert_eq!(grads[10].dims(), &[1, 16, 3, 3]);       // dw5
+    assert_eq!(grads[11].dims(), &[1]);                 // db5
+
+    // --- Update step ---
+    unet.w1 = unet.w1.sub(&grads[2].affine(0.1, 0.0)?)?;
+
+    // Verify w1 changed
+    let diff = unet
+        .w1
+        .sub(&initial_w1)?
+        .sqr()?
+        .sum_all()?
+        .to_scalar::<f32>()?;
+    assert!(diff > 0.0, "w1 did not change after update");
 
     Ok(())
 }
