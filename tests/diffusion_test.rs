@@ -345,7 +345,7 @@ fn test_cnn_5layers_forward_backward_update() -> Result<()> {
 // =============================================================================
 //
 // End-to-end shape and update test for SimpleDenoisingUNet:
-//   1. Forward: verify output (B, img_dim) and 12 cached intermediate tensors.
+//   1. Forward: verify output (B, img_dim) and 20 cached intermediate tensors.
 //   2. Backward: verify 12 gradient tensors matching parameter shapes.
 //   3. SGD step update verification.
 #[test]
@@ -362,10 +362,9 @@ fn test_unet_forward_backward_update() -> Result<()> {
     let target = Tensor::randn(0.0f32, 1.0f32, (batch_size, img_dim), device)?;
 
     // --- Forward pass ---
-    // 12 intermediates cached
     let (pred, intermediates) = DenoisingModel::forward(&unet, &v)?;
     assert_eq!(pred.dims(), &[batch_size, img_dim]);
-    assert_eq!(intermediates.len(), 12);
+    assert_eq!(intermediates.len(), 20);
 
     let initial_w1 = unet.w1.clone();
 

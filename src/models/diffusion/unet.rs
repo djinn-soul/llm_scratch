@@ -4,6 +4,80 @@ use candle_core::{DType, Device, Tensor};
 use super::denoising_cnn_ops::{manual_conv2d, manual_conv2d_backward};
 use super::DenoisingModel;
 
+const RESIDUAL_SCALE: f64 = 0.7071067811865475;
+const GROUP_NORM_EPS: f64 = 1e-5;
+
+fn leaky_relu(x: &Tensor) -> Result<Tensor> {
+    Ok(x.maximum(&x.affine(0.01, 0.0)?)?)
+}
+
+fn leaky_relu_grad(x: &Tensor) -> Result<Tensor> {
+    Ok(x.ge(0.0f32)?.to_dtype(DType::F32)?.affine(0.99, 0.01)?)
+}
+
+fn group_norm_forward(x: &Tensor, groups: usize) -> Result<(Tensor, Tensor, Tensor)> {
+    let (b, c, h, w) = x.dims4()?;
+    if c % groups != 0 {
+        bail!(
+            "group norm expected channels ({}) divisible by groups ({})",
+            c,
+            groups
+        );
+    }
+
+    let group_width = (c / groups) * h * w;
+    let x_grouped = x.reshape((b, groups, group_width))?;
+    let mean = x_grouped.mean(2)?.reshape((b, groups, 1))?;
+    let centered = x_grouped.sub(&mean.broadcast_as((b, groups, group_width))?)?;
+    let variance = centered.sqr()?.mean(2)?.reshape((b, groups, 1))?;
+    let std = variance.affine(1.0, GROUP_NORM_EPS)?.sqrt()?;
+    let inv_std = Tensor::ones((b, groups, 1), DType::F32, x.device())?.div(&std)?;
+    let x_hat = centered
+        .mul(&inv_std.broadcast_as((b, groups, group_width))?)?
+        .reshape((b, c, h, w))?;
+    let y = x_hat.clone();
+
+    Ok((y, x_hat, inv_std))
+}
+
+fn group_norm_backward(
+    delta_y: &Tensor,
+    x_hat: &Tensor,
+    inv_std: &Tensor,
+    groups: usize,
+) -> Result<Tensor> {
+    let (b, c, h, w) = delta_y.dims4()?;
+    if c % groups != 0 {
+        bail!(
+            "group norm backward expected channels ({}) divisible by groups ({})",
+            c,
+            groups
+        );
+    }
+
+    let group_width = (c / groups) * h * w;
+    let dy = delta_y.reshape((b, groups, group_width))?;
+    let xh = x_hat.reshape((b, groups, group_width))?;
+
+    let mean_dy = dy
+        .sum(2)?
+        .affine(1.0 / group_width as f64, 0.0)?
+        .reshape((b, groups, 1))?;
+    let mean_dy_xhat = dy
+        .mul(&xh)?
+        .sum(2)?
+        .affine(1.0 / group_width as f64, 0.0)?
+        .reshape((b, groups, 1))?;
+
+    let centered_dy = dy.sub(&mean_dy.broadcast_as((b, groups, group_width))?)?;
+    let variance_term = xh.mul(&mean_dy_xhat.broadcast_as((b, groups, group_width))?)?;
+    let dx_grouped = centered_dy
+        .sub(&variance_term)?
+        .mul(&inv_std.broadcast_as((b, groups, group_width))?)?;
+
+    Ok(dx_grouped.reshape((b, c, h, w))?)
+}
+
 pub struct SimpleDenoisingUNet {
     pub img_dim: usize,
     pub cond_dim: usize,
@@ -113,22 +187,25 @@ impl DenoisingModel for SimpleDenoisingUNet {
 
         // level 1
 
-        let z1 = manual_conv2d(&input_cat, &self.w1, Some(&self.b1), &device)?;
-        // reluleaky
-        let a1 = z1.maximum(&z1.affine(0.01, 0.0)?)?;
+        let z1_conv = manual_conv2d(&input_cat, &self.w1, Some(&self.b1), &device)?;
+        let (z1, z1_hat, z1_inv_std) = group_norm_forward(&z1_conv, 4)?;
+        let a1 = leaky_relu(&z1)?;
         let a1_down = a1
             .reshape((b, 16, h_down, 2, w_down, 2))?
             .mean(5)?
             .mean(3)?;
 
         // level 2
-        let z2 = manual_conv2d(&a1_down, &self.w2, Some(&self.b2), &device)?;
-        let a2 = z2.maximum(&z2.affine(0.01, 0.0)?)?;
+        let z2_conv = manual_conv2d(&a1_down, &self.w2, Some(&self.b2), &device)?;
+        let (z2, z2_hat, z2_inv_std) = group_norm_forward(&z2_conv, 4)?;
+        let a2 = leaky_relu(&z2)?;
 
-        // level 3
-
-        let z3 = manual_conv2d(&a2, &self.w3, Some(&self.b3), &device)?;
-        let a3 = z3.maximum(&z3.affine(0.01, 0.0)?)?;
+        // Bottleneck residual block: conv3 keeps the same shape as a2.
+        // Scaling by 1/sqrt(2) keeps the residual sum variance near the input scale.
+        let z3_conv = manual_conv2d(&a2, &self.w3, Some(&self.b3), &device)?;
+        let z3_res = z3_conv.add(&a2)?.affine(RESIDUAL_SCALE, 0.0)?;
+        let (z3, z3_hat, z3_inv_std) = group_norm_forward(&z3_res, 4)?;
+        let a3 = leaky_relu(&z3)?;
 
         // decoder level(28*28)
 
@@ -141,14 +218,17 @@ impl DenoisingModel for SimpleDenoisingUNet {
 
         let decode_cat = Tensor::cat(&[&a3_up, &a1], 1)?;
         // conv4(B,16,H,W)
-        let z4 = manual_conv2d(&decode_cat, &self.w4, Some(&self.b4), &device)?;
-        let a4 = z4.maximum(&z4.affine(0.01, 0.0)?)?;
+        let z4_conv = manual_conv2d(&decode_cat, &self.w4, Some(&self.b4), &device)?;
+        let z4_res = z4_conv.add(&a1)?.affine(RESIDUAL_SCALE, 0.0)?;
+        let (z4, z4_hat, z4_inv_std) = group_norm_forward(&z4_res, 4)?;
+        let a4 = leaky_relu(&z4)?;
 
         // conv5
         let z5 = manual_conv2d(&a4, &self.w5, Some(&self.b5), &device)?;
         let pred = z5.reshape((b, self.img_dim))?;
         let intermediates = vec![
-            input_cat, z1, a1, a1_down, z2, a2, z3, a3, a3_up, decode_cat, z4, a4,
+            input_cat, z1, z1_hat, z1_inv_std, a1, a1_down, z2, z2_hat, z2_inv_std, a2, z3, z3_hat,
+            z3_inv_std, a3, a3_up, decode_cat, z4, z4_hat, z4_inv_std, a4,
         ];
         Ok((pred, intermediates))
     }
@@ -159,9 +239,9 @@ impl DenoisingModel for SimpleDenoisingUNet {
         pred: &Tensor,
         target: &Tensor,
     ) -> Result<Vec<Tensor>> {
-        if intermediates.len() != 12 {
+        if intermediates.len() != 20 {
             bail!(
-                "SimpleDenoisingUNet expected 12 cached intermediates from forward(), got {}",
+                "SimpleDenoisingUNet expected 20 cached intermediates from forward(), got {}",
                 intermediates.len()
             );
         }
@@ -173,7 +253,28 @@ impl DenoisingModel for SimpleDenoisingUNet {
         let h_down = h / 2;
         let w_down = w_img / 2;
 
-        let (input_cat, z1, _a1, a1_down, z2, a2, z3, _a3, _a3_up, decode_cat, z4, a4) = (
+        let (
+            input_cat,
+            z1,
+            z1_hat,
+            z1_inv_std,
+            _a1,
+            a1_down,
+            z2,
+            z2_hat,
+            z2_inv_std,
+            a2,
+            z3,
+            z3_hat,
+            z3_inv_std,
+            _a3,
+            _a3_up,
+            decode_cat,
+            z4,
+            z4_hat,
+            z4_inv_std,
+            a4,
+        ) = (
             &intermediates[0],
             &intermediates[1],
             &intermediates[2],
@@ -186,6 +287,14 @@ impl DenoisingModel for SimpleDenoisingUNet {
             &intermediates[9],
             &intermediates[10],
             &intermediates[11],
+            &intermediates[12],
+            &intermediates[13],
+            &intermediates[14],
+            &intermediates[15],
+            &intermediates[16],
+            &intermediates[17],
+            &intermediates[18],
+            &intermediates[19],
         );
 
         // 1. MSE gradient w.r.t predication
@@ -200,13 +309,16 @@ impl DenoisingModel for SimpleDenoisingUNet {
         let (delta_a4, dw5) = manual_conv2d_backward(a4, &self.w5, &delta_z5, device)?;
 
         // 3. leaky rule backward on z4
-        let relu_grad4 = z4.ge(0.0f32)?.to_dtype(DType::F32)?.affine(0.99, 0.01)?;
+        let relu_grad4 = leaky_relu_grad(z4)?;
         let delta_z4 = delta_a4.mul(&relu_grad4)?;
+        let delta_z4_norm = group_norm_backward(&delta_z4, z4_hat, z4_inv_std, 4)?;
+        let delta_z4_conv = delta_z4_norm.affine(RESIDUAL_SCALE, 0.0)?;
+        let delta_a1_from_decoder_residual = delta_z4_norm.affine(RESIDUAL_SCALE, 0.0)?;
 
         // 4. conv4 backward
-        let db4 = delta_z4.sum(0)?.sum(1)?.sum(1)?;
+        let db4 = delta_z4_conv.sum(0)?.sum(1)?.sum(1)?;
         let (delta_decode_cat, dw4) =
-            manual_conv2d_backward(decode_cat, &self.w4, &delta_z4, &device)?;
+            manual_conv2d_backward(decode_cat, &self.w4, &delta_z4_conv, &device)?;
 
         //5.  split skip connection gradient
         let delta_a3_up = delta_decode_cat.narrow(1, 0, 32)?.contiguous()?;
@@ -221,20 +333,27 @@ impl DenoisingModel for SimpleDenoisingUNet {
 
         //7.leaky relu backward on z3
 
-        let relu_grad3 = z3.ge(0.0f32)?.to_dtype(DType::F32)?.affine(0.99, 0.01)?;
+        let relu_grad3 = leaky_relu_grad(z3)?;
         let delta_z3 = delta_a3.mul(&relu_grad3)?;
+        let delta_z3_norm = group_norm_backward(&delta_z3, z3_hat, z3_inv_std, 4)?;
+        let delta_z3_conv = delta_z3_norm.affine(RESIDUAL_SCALE, 0.0)?;
+        let delta_a2_from_bottleneck_residual = delta_z3_norm.affine(RESIDUAL_SCALE, 0.0)?;
 
         // 8.botlleneck conv3 backward
-        let db3 = delta_z3.sum(0)?.sum(1)?.sum(1)?;
-        let (delta_a2, dw3) = manual_conv2d_backward(a2, &self.w3, &delta_z3, &device)?;
+        let db3 = delta_z3_conv.sum(0)?.sum(1)?.sum(1)?;
+        let (delta_a2_from_conv3, dw3) =
+            manual_conv2d_backward(a2, &self.w3, &delta_z3_conv, &device)?;
+        let delta_a2 = delta_a2_from_conv3.add(&delta_a2_from_bottleneck_residual)?;
 
         // 9. leaky relu backward onz2
-        let relu_grad2 = z2.ge(0.0f32)?.to_dtype(DType::F32)?.affine(0.99, 0.01)?;
+        let relu_grad2 = leaky_relu_grad(z2)?;
         let delta_z2 = delta_a2.mul(&relu_grad2)?;
+        let delta_z2_norm = group_norm_backward(&delta_z2, z2_hat, z2_inv_std, 4)?;
 
         //10. maxpool backward
-        let db2 = delta_z2.sum(0)?.sum(1)?.sum(1)?;
-        let (delta_a1_down, dw2) = manual_conv2d_backward(a1_down, &self.w2, &delta_z2, &device)?;
+        let db2 = delta_z2_norm.sum(0)?.sum(1)?.sum(1)?;
+        let (delta_a1_down, dw2) =
+            manual_conv2d_backward(a1_down, &self.w2, &delta_z2_norm, &device)?;
 
         // 11. average pool 2x2 backward(nearest neighbour upsample scaled gradient)
         let scaled_delta = delta_a1_down.affine(0.25, 0.0)?;
@@ -245,16 +364,19 @@ impl DenoisingModel for SimpleDenoisingUNet {
             .reshape((b, 16, h, w_img))?;
 
         // 12. sum gradien flow in to a1
-        let delta_a1 = delta_a1_from_down.add(&delta_a1_from_skip)?;
+        let delta_a1 = delta_a1_from_down
+            .add(&delta_a1_from_skip)?
+            .add(&delta_a1_from_decoder_residual)?;
 
         //13. leaky relu backward on z1
-        let relu_grad1 = z1.ge(0.0f32)?.to_dtype(DType::F32)?.affine(0.99, 0.01)?;
+        let relu_grad1 = leaky_relu_grad(z1)?;
         let delta_z1 = delta_a1.mul(&relu_grad1)?;
+        let delta_z1_norm = group_norm_backward(&delta_z1, z1_hat, z1_inv_std, 4)?;
 
         // 14.conv1 backward
-        let db1 = delta_z1.sum(0)?.sum(1)?.sum(1)?;
+        let db1 = delta_z1_norm.sum(0)?.sum(1)?.sum(1)?;
         let (delta_input_cat, dw1) =
-            manual_conv2d_backward(input_cat, &self.w1, &delta_z1, device)?;
+            manual_conv2d_backward(input_cat, &self.w1, &delta_z1_norm, device)?;
 
         // 15. conv1 input backward
 
