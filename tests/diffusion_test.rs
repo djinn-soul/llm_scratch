@@ -364,13 +364,13 @@ fn test_unet_forward_backward_update() -> Result<()> {
     // --- Forward pass ---
     let (pred, intermediates) = DenoisingModel::forward(&unet, &v)?;
     assert_eq!(pred.dims(), &[batch_size, img_dim]);
-    assert_eq!(intermediates.len(), 20);
+    assert_eq!(intermediates.len(), 26);
 
     let initial_w1 = unet.w1.clone();
 
     // --- Backward pass ---
     let grads = DenoisingModel::backward(&unet, &v, &intermediates, &pred, &target)?;
-    assert_eq!(grads.len(), 12);
+    assert_eq!(grads.len(), 15);
     assert_eq!(grads[0].dims(), &[img_dim, cond_dim]); // dw_cond
     assert_eq!(grads[1].dims(), &[img_dim]); // db_cond
     assert_eq!(grads[2].dims(), &[16, 2, 3, 3]); // dw1

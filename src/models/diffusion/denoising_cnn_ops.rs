@@ -328,8 +328,10 @@ pub fn manual_conv2d_backward(
                     .reshape((c_out, c_in))?;
 
                 // dx_perm = w_slice^T @ delta_y_flat  → (C_in, B*H*W)
-                let dx_perm =
-                    w_slice.t()?.contiguous()?.matmul(&delta_out_slice.contiguous()?)?;
+                let dx_perm = w_slice
+                    .t()?
+                    .contiguous()?
+                    .matmul(&delta_out_slice.contiguous()?)?;
 
                 // Reshape to (B, C_in, H, W).
                 let dx_slice = dx_perm

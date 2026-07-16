@@ -110,7 +110,7 @@ fn main() -> Result<()> {
     let hidden_dim = 512; // hidden layer width
     let batch_size = match device {
         Device::Cuda(_) => 256, // CUDA: larger batch → better GPU utilisation
-        _               => 128, // CPU: smaller batch → fits in RAM
+        _ => 128,               // CPU: smaller batch → fits in RAM
     };
     let epochs = 8000; // total gradient update steps
     let lr = 0.001; // Adam learning rate (α)

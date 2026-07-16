@@ -107,7 +107,7 @@ fn main() -> Result<()> {
     let hidden_dim = 512; // hidden layer width of the denoising MLP
     let batch_size = match device {
         Device::Cuda(_) => 256, // CUDA: larger batch → better GPU utilisation
-        _               => 128, // CPU: smaller batch → fits in RAM
+        _ => 128,               // CPU: smaller batch → fits in RAM
     };
     let epochs = 20000; // total number of gradient update steps
     let lr = 0.001; // Adam learning rate (α)

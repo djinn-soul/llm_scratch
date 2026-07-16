@@ -56,8 +56,8 @@
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, Tensor};
 
-use super::DenoisingModel;
 use super::denoising_cnn_ops::{manual_conv2d, manual_conv2d_backward};
+use super::DenoisingModel;
 
 // =============================================================================
 // SimpleDenoisingCNN5Layers — struct definition
@@ -82,20 +82,20 @@ use super::denoising_cnn_ops::{manual_conv2d, manual_conv2d_backward};
 //   w5:     (1,    64,  5, 5)          — Conv5: 64→1 channel (noise prediction)
 //   b5:     (1,)
 pub struct SimpleDenoisingCNN5Layers {
-    pub img_dim:  usize,    // flattened image size (784 for MNIST)
-    pub cond_dim: usize,    // conditioning vector size (time_emb_dim + class_dim = 26)
-    pub w_cond:   Tensor,   // [img_dim, cond_dim]
-    pub b_cond:   Tensor,   // [img_dim]
-    pub w1:       Tensor,   // [64,  2,   5, 5]
-    pub b1:       Tensor,   // [64]
-    pub w2:       Tensor,   // [128, 64,  5, 5]
-    pub b2:       Tensor,   // [128]
-    pub w3:       Tensor,   // [128, 128, 5, 5]
-    pub b3:       Tensor,   // [128]
-    pub w4:       Tensor,   // [64,  128, 5, 5]
-    pub b4:       Tensor,   // [64]
-    pub w5:       Tensor,   // [1,   64,  5, 5]
-    pub b5:       Tensor,   // [1]
+    pub img_dim: usize,  // flattened image size (784 for MNIST)
+    pub cond_dim: usize, // conditioning vector size (time_emb_dim + class_dim = 26)
+    pub w_cond: Tensor,  // [img_dim, cond_dim]
+    pub b_cond: Tensor,  // [img_dim]
+    pub w1: Tensor,      // [64,  2,   5, 5]
+    pub b1: Tensor,      // [64]
+    pub w2: Tensor,      // [128, 64,  5, 5]
+    pub b2: Tensor,      // [128]
+    pub w3: Tensor,      // [128, 128, 5, 5]
+    pub b3: Tensor,      // [128]
+    pub w4: Tensor,      // [64,  128, 5, 5]
+    pub b4: Tensor,      // [64]
+    pub w5: Tensor,      // [1,   64,  5, 5]
+    pub b5: Tensor,      // [1]
 }
 
 impl SimpleDenoisingCNN5Layers {
@@ -213,7 +213,7 @@ impl DenoisingModel for SimpleDenoisingCNN5Layers {
         let w_img = h;
 
         // --- Step 1: Split input -------------------------------------------
-        let xt      = x.narrow(1, 0, self.img_dim)?;
+        let xt = x.narrow(1, 0, self.img_dim)?;
         let cond_vec = x.narrow(1, self.img_dim, self.cond_dim)?;
 
         // --- Step 2: Conditioning projection → spatial map ------------------
@@ -226,7 +226,7 @@ impl DenoisingModel for SimpleDenoisingCNN5Layers {
             .reshape((b, 1, h, w_img))?;
 
         // --- Step 3: 2-channel input ----------------------------------------
-        let xt_img    = xt.reshape((b, 1, h, w_img))?;
+        let xt_img = xt.reshape((b, 1, h, w_img))?;
         let input_cat = Tensor::cat(&[&xt_img, &cond_map], 1)?; // (B, 2, H, W)
 
         // --- Step 4: Conv1 + Leaky-ReLU  (2→64 channels, 5×5) --------------
@@ -252,7 +252,7 @@ impl DenoisingModel for SimpleDenoisingCNN5Layers {
         // --- Step 8: Conv5 → output  (64→1 channel, 5×5) -------------------
         // No activation: noise predictions are unbounded real values.
         // z5 shape: (B, 1, 28, 28) → flattened to (B, 784).
-        let z5   = manual_conv2d(&a4, &self.w5, Some(&self.b5), &device)?;
+        let z5 = manual_conv2d(&a4, &self.w5, Some(&self.b5), &device)?;
         let pred = z5.reshape((b, self.img_dim))?;
 
         // Cache 9 tensors required by backward().
@@ -304,19 +304,19 @@ impl DenoisingModel for SimpleDenoisingCNN5Layers {
 
         // Unpack cached intermediates in the same order as forward().
         let input_cat = &intermediates[0]; // (B, 2,   28, 28) — 2-channel input
-        let z1        = &intermediates[1]; // (B, 64,  28, 28) — Conv1 pre-act
-        let a1        = &intermediates[2]; // (B, 64,  28, 28) — Conv1 post-act
-        let z2        = &intermediates[3]; // (B, 128, 28, 28) — Conv2 pre-act
-        let a2        = &intermediates[4]; // (B, 128, 28, 28) — Conv2 post-act
-        let z3        = &intermediates[5]; // (B, 128, 28, 28) — Conv3 pre-act
-        let a3        = &intermediates[6]; // (B, 128, 28, 28) — Conv3 post-act
-        let z4        = &intermediates[7]; // (B, 64,  28, 28) — Conv4 pre-act
-        let a4        = &intermediates[8]; // (B, 64,  28, 28) — Conv4 post-act
+        let z1 = &intermediates[1]; // (B, 64,  28, 28) — Conv1 pre-act
+        let a1 = &intermediates[2]; // (B, 64,  28, 28) — Conv1 post-act
+        let z2 = &intermediates[3]; // (B, 128, 28, 28) — Conv2 pre-act
+        let a2 = &intermediates[4]; // (B, 128, 28, 28) — Conv2 post-act
+        let z3 = &intermediates[5]; // (B, 128, 28, 28) — Conv3 pre-act
+        let a3 = &intermediates[6]; // (B, 128, 28, 28) — Conv3 post-act
+        let z4 = &intermediates[7]; // (B, 64,  28, 28) — Conv4 pre-act
+        let a4 = &intermediates[8]; // (B, 64,  28, 28) — Conv4 post-act
 
         // --- MSE gradient ∂L/∂pred -----------------------------------------
         // scale = 2 / (B * img_dim) — the derivative of (1/N)||pred-target||²
         // multiplied by 2 from the squared-difference expansion.
-        let scale      = 2.0 / (b * self.img_dim) as f64;
+        let scale = 2.0 / (b * self.img_dim) as f64;
         let delta_pred = pred.sub(target)?.affine(scale, 0.0)?;
 
         // Reshape to spatial: (B, 784) → (B, 1, 28, 28) for Conv5 backward.
@@ -332,7 +332,7 @@ impl DenoisingModel for SimpleDenoisingCNN5Layers {
         // f'(z4) = 0.99 * (z4>=0) + 0.01 correctly encodes:
         //   f'(z) = 1.00 for z≥0 and f'(z) = 0.01 for z<0.
         let relu_grad4 = z4.ge(0.0f32)?.to_dtype(DType::F32)?.affine(0.99, 0.01)?;
-        let delta_z4   = delta_a4.mul(&relu_grad4)?;
+        let delta_z4 = delta_a4.mul(&relu_grad4)?;
 
         // --- Conv4 backward: (128→64 channels) ------------------------------
         let db4 = delta_z4.sum(0)?.sum(1)?.sum(1)?;
@@ -340,7 +340,7 @@ impl DenoisingModel for SimpleDenoisingCNN5Layers {
 
         // --- Leaky-ReLU3 backward -------------------------------------------
         let relu_grad3 = z3.ge(0.0f32)?.to_dtype(DType::F32)?.affine(0.99, 0.01)?;
-        let delta_z3   = delta_a3.mul(&relu_grad3)?;
+        let delta_z3 = delta_a3.mul(&relu_grad3)?;
 
         // --- Conv3 backward: (128→128 channels, bottleneck) -----------------
         let db3 = delta_z3.sum(0)?.sum(1)?.sum(1)?;
@@ -348,7 +348,7 @@ impl DenoisingModel for SimpleDenoisingCNN5Layers {
 
         // --- Leaky-ReLU2 backward -------------------------------------------
         let relu_grad2 = z2.ge(0.0f32)?.to_dtype(DType::F32)?.affine(0.99, 0.01)?;
-        let delta_z2   = delta_a2.mul(&relu_grad2)?;
+        let delta_z2 = delta_a2.mul(&relu_grad2)?;
 
         // --- Conv2 backward: (64→128 channels) ------------------------------
         let db2 = delta_z2.sum(0)?.sum(1)?.sum(1)?;
@@ -356,7 +356,7 @@ impl DenoisingModel for SimpleDenoisingCNN5Layers {
 
         // --- Leaky-ReLU1 backward -------------------------------------------
         let relu_grad1 = z1.ge(0.0f32)?.to_dtype(DType::F32)?.affine(0.99, 0.01)?;
-        let delta_z1   = delta_a1.mul(&relu_grad1)?;
+        let delta_z1 = delta_a1.mul(&relu_grad1)?;
 
         // --- Conv1 backward: (2→64 channels) --------------------------------
         // delta_input_cat: gradient w.r.t. the 2-channel (image + cond) input.
@@ -370,7 +370,7 @@ impl DenoisingModel for SimpleDenoisingCNN5Layers {
         // WHY not channel 0? The noisy image xt is a *data input*, not a
         // model parameter.  Gradients w.r.t. model parameters only flow through
         // the conditioning projection (w_cond, b_cond).
-        let delta_cond_map  = delta_input_cat.narrow(1, 1, 1)?;
+        let delta_cond_map = delta_input_cat.narrow(1, 1, 1)?;
         let delta_cond_flat = delta_cond_map.reshape((b, self.img_dim))?;
 
         // db_cond: sum over batch → (img_dim,)
@@ -380,16 +380,11 @@ impl DenoisingModel for SimpleDenoisingCNN5Layers {
         // Outer-product gradient: W has shape (img_dim, cond_dim), so
         //   ∂L/∂W = (∂L/∂output)^T × input = (B, img_dim)^T × (B, cond_dim)
         let cond_vec = v.narrow(1, self.img_dim, self.cond_dim)?.contiguous()?;
-        let dw_cond  = delta_cond_flat.t()?.contiguous()?.matmul(&cond_vec)?;
+        let dw_cond = delta_cond_flat.t()?.contiguous()?.matmul(&cond_vec)?;
 
         // Return all 12 gradients in params() / param_names() order.
         Ok(vec![
-            dw_cond, db_cond,
-            dw1, db1,
-            dw2, db2,
-            dw3, db3,
-            dw4, db4,
-            dw5, db5,
+            dw_cond, db_cond, dw1, db1, dw2, db2, dw3, db3, dw4, db4, dw5, db5,
         ])
     }
 
@@ -399,12 +394,18 @@ impl DenoisingModel for SimpleDenoisingCNN5Layers {
     // Order must be consistent with backward() output and param_names().
     fn params(&self) -> Vec<&Tensor> {
         vec![
-            &self.w_cond, &self.b_cond,
-            &self.w1, &self.b1,
-            &self.w2, &self.b2,
-            &self.w3, &self.b3,
-            &self.w4, &self.b4,
-            &self.w5, &self.b5,
+            &self.w_cond,
+            &self.b_cond,
+            &self.w1,
+            &self.b1,
+            &self.w2,
+            &self.b2,
+            &self.w3,
+            &self.b3,
+            &self.w4,
+            &self.b4,
+            &self.w5,
+            &self.b5,
         ]
     }
 
@@ -415,12 +416,7 @@ impl DenoisingModel for SimpleDenoisingCNN5Layers {
     // gradient norms.  Same order as params() and backward().
     fn param_names(&self) -> Vec<&str> {
         vec![
-            "w_cond", "b_cond",
-            "w1", "b1",
-            "w2", "b2",
-            "w3", "b3",
-            "w4", "b4",
-            "w5", "b5",
+            "w_cond", "b_cond", "w1", "b1", "w2", "b2", "w3", "b3", "w4", "b4", "w5", "b5",
         ]
     }
 
@@ -431,12 +427,18 @@ impl DenoisingModel for SimpleDenoisingCNN5Layers {
     // per-parameter updates in place.  Order must match params() / backward().
     fn params_mut(&mut self) -> Vec<&mut Tensor> {
         vec![
-            &mut self.w_cond, &mut self.b_cond,
-            &mut self.w1, &mut self.b1,
-            &mut self.w2, &mut self.b2,
-            &mut self.w3, &mut self.b3,
-            &mut self.w4, &mut self.b4,
-            &mut self.w5, &mut self.b5,
+            &mut self.w_cond,
+            &mut self.b_cond,
+            &mut self.w1,
+            &mut self.b1,
+            &mut self.w2,
+            &mut self.b2,
+            &mut self.w3,
+            &mut self.b3,
+            &mut self.w4,
+            &mut self.b4,
+            &mut self.w5,
+            &mut self.b5,
         ]
     }
 }

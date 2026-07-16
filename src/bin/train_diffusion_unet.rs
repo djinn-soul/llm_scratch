@@ -195,7 +195,9 @@ fn main() -> Result<()> {
     let time_emb_dim = 16;
     let cond_dim = time_emb_dim + 10;
     let mut model = SimpleDenoisingUNet::new(img_dim, cond_dim, &device)?;
-    let scheduler = BetaScheduler::new(100, 1e-4, 0.02, &device)?;
+    // let scheduler = BetaScheduler::new(100, 1e-4, 0.02, &device)?;
+    let scheduler = BetaScheduler::new_cosine(100, &device)?;
+
     let mut optimizer = MlpAdamOptimizer::new(&model, 1e-4)?;
     let sample_class = 3u32;
     let class_one_hot = one_hot_class(sample_class as usize, 10, &device)?;

@@ -18,18 +18,18 @@
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, Tensor};
 
-use super::DenoisingModel;
 use super::denoising_cnn_ops::{manual_conv2d, manual_conv2d_backward};
+use super::DenoisingModel;
 
 pub struct SimpleDenoisingCNN {
-    pub img_dim:  usize,   // flattened image size (784 for MNIST)
-    pub cond_dim: usize,   // conditioning vector size (time_emb_dim + class_dim)
-    pub w_cond:   Tensor,  // [img_dim, cond_dim]
-    pub b_cond:   Tensor,  // [img_dim]
-    pub w1:       Tensor,  // [16, 2, 3, 3]
-    pub b1:       Tensor,  // [16]
-    pub w2:       Tensor,  // [1, 16, 3, 3]
-    pub b2:       Tensor,  // [1]
+    pub img_dim: usize,  // flattened image size (784 for MNIST)
+    pub cond_dim: usize, // conditioning vector size (time_emb_dim + class_dim)
+    pub w_cond: Tensor,  // [img_dim, cond_dim]
+    pub b_cond: Tensor,  // [img_dim]
+    pub w1: Tensor,      // [16, 2, 3, 3]
+    pub b1: Tensor,      // [16]
+    pub w2: Tensor,      // [1, 16, 3, 3]
+    pub b2: Tensor,      // [1]
 }
 
 impl SimpleDenoisingCNN {

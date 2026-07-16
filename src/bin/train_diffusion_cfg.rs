@@ -230,7 +230,7 @@ pub fn main() -> Result<()> {
     let img_dim = 784; // 28x28 flattened image size
     let batch_size = match device {
         Device::Cuda(_) => 256, // CUDA: larger batch → better GPU utilisation
-        _               => 128, // CPU: smaller batch → fits in RAM
+        _ => 128,               // CPU: smaller batch → fits in RAM
     };
     let epochs = 20000; // total gradient update steps
     let lr = 0.001; // Adam learning rate

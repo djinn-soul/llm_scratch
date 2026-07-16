@@ -174,4 +174,71 @@ impl BetaScheduler {
             .add(&noise.broadcast_mul(&sqrt_one_minus_alpha_bar)?)?;
         Ok(xt)
     }
+    pub fn new_cosine(steps: usize, device: &Device) -> Result<Self> {
+        let s = 0.008f64;
+        let mut alphas_cumprod_vec = Vec::with_capacity(steps);
+
+        // f(t) = cos(((t/T + s) / (1 + s)) * pi/2)^2
+        let f = |t_val: f64| {
+            let num = (t_val / steps as f64) + s;
+            let denom = 1.0 + s;
+            let angle = (num / denom) * (std::f64::consts::PI / 2.0);
+            angle.cos().powi(2)
+        };
+
+        let f0 = f(0.0);
+        for t in 0..steps {
+            let alpha_bar = f(t as f64) / f0;
+            alphas_cumprod_vec.push(alpha_bar as f32);
+        }
+
+        let mut betas_vec = Vec::with_capacity(steps);
+        let mut prev_alpha_bar = 1.0f64;
+        for t in 0..steps {
+            let alpha_bar = alphas_cumprod_vec[t] as f64;
+            // beta_t = 1 - alpha_bar_t / alpha_bar_{t-1}
+            let beta = (1.0 - (alpha_bar / prev_alpha_bar)).min(0.999);
+            betas_vec.push(beta as f32);
+            prev_alpha_bar = alpha_bar;
+        }
+
+        let betas = Tensor::new(betas_vec.as_slice(), device)?;
+        let alphas = Tensor::ones(steps, DType::F32, device)?.sub(&betas)?;
+        let alphas_cumprod = Tensor::new(alphas_cumprod_vec.as_slice(), device)?;
+
+        let mut alphas_cumprod_prev_vec = Vec::with_capacity(steps);
+        alphas_cumprod_prev_vec.push(1.0f32);
+        for i in 0..(steps - 1) {
+            alphas_cumprod_prev_vec.push(alphas_cumprod_vec[i]);
+        }
+        let alphas_cumprod_prev = Tensor::new(alphas_cumprod_prev_vec.as_slice(), device)?;
+
+        let sqrt_alphas_cumprod = alphas_cumprod.sqrt()?;
+        let sqrt_one_minus_alphas_cumprod = Tensor::ones(steps, DType::F32, device)?
+            .sub(&alphas_cumprod)?
+            .sqrt()?;
+
+        // Calculate posterior standard deviations
+        let mut sigmas_vec = Vec::with_capacity(steps);
+        sigmas_vec.push(0.0f32);
+        for t in 1..steps {
+            let alpha_bar = alphas_cumprod_vec[t];
+            let alpha_bar_prev = alphas_cumprod_prev_vec[t];
+            let beta = betas_vec[t];
+            let variance = ((1.0 - alpha_bar_prev) / (1.0 - alpha_bar)) * beta;
+            sigmas_vec.push(variance.sqrt());
+        }
+        let sigmas = Tensor::new(sigmas_vec.as_slice(), device)?;
+
+        Ok(Self {
+            steps,
+            betas,
+            alphas,
+            alphas_cumprod,
+            alphas_cumprod_prev,
+            sqrt_alphas_cumprod,
+            sqrt_one_minus_alphas_cumprod,
+            sigmas,
+        })
+    }
 }

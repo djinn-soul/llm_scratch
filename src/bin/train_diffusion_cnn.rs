@@ -247,12 +247,12 @@ pub fn main() -> Result<()> {
     //                This is the dimension of the conditioning vector fed to
     //                the CNN's projection layer.
     // =========================================================================
-    let epochs        = 20000;
-    let lr            = 0.001f64;
-    let img_dim       = 784;   // 28×28 pixels, flattened
-    let class_dim     = 10;    // number of MNIST digit classes
-    let time_emb_dim  = 16;    // sinusoidal time embedding size
-    let steps         = 100;   // T: diffusion timesteps
+    let epochs = 20000;
+    let lr = 0.001f64;
+    let img_dim = 784; // 28×28 pixels, flattened
+    let class_dim = 10; // number of MNIST digit classes
+    let time_emb_dim = 16; // sinusoidal time embedding size
+    let steps = 100; // T: diffusion timesteps
     let label_dropout = 0.15f32;
 
     // The CNN receives a single concatenated conditioning vector of size
@@ -332,13 +332,9 @@ pub fn main() -> Result<()> {
         //   `Tensor::rand` generates floats in [low, high).  Subtracting a tiny
         //   epsilon prevents the rare edge case where the float rounds to exactly
         //   `total_samples`, which would be an out-of-bounds index.
-        let index_tensor = Tensor::rand(
-            0.0f32,
-            total_samples as f32 - 1e-4,
-            (batch_size,),
-            &device,
-        )?
-        .to_dtype(DType::U32)?;
+        let index_tensor =
+            Tensor::rand(0.0f32, total_samples as f32 - 1e-4, (batch_size,), &device)?
+                .to_dtype(DType::U32)?;
 
         // Copy indices to a Rust Vec so we can index the plain Vec<u8> labels.
         let indices = index_tensor.to_vec1::<u32>()?;

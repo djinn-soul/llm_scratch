@@ -158,7 +158,7 @@ pub fn main() -> Result<()> {
     // CPU memory is more constrained: 128 × 784 × float × 128 features ≈ 50 MB.
     let batch_size = match device {
         Device::Cuda(_) => 256, // CUDA: larger batch → better GPU utilisation
-        _               => 128, // CPU: smaller batch → fits in RAM
+        _ => 128,               // CPU: smaller batch → fits in RAM
     };
     println!("Selected Batch Size: {}", batch_size);
 
@@ -185,14 +185,14 @@ pub fn main() -> Result<()> {
     // cond_dim     — time_emb_dim + class_dim = 26.
     //                The CNN's first layer projects this into a 784-dim spatial
     //                conditioning map.
-    let epochs        = 20000;
-    let lr            = 0.001f64;
-    let img_dim       = 784;
-    let class_dim     = 10;
-    let time_emb_dim  = 16;
-    let steps         = 100;
+    let epochs = 20000;
+    let lr = 0.001f64;
+    let img_dim = 784;
+    let class_dim = 10;
+    let time_emb_dim = 16;
+    let steps = 100;
     let label_dropout = 0.15f32;
-    let cond_dim      = time_emb_dim + class_dim; // 26
+    let cond_dim = time_emb_dim + class_dim; // 26
 
     // --- Dataset loading -----------------------------------------------------
     // `acquire_mnist` downloads and parses MNIST on first run (cached after).
@@ -236,13 +236,9 @@ pub fn main() -> Result<()> {
     for epoch in 1..=epochs {
         // --- Step 1: Random mini-batch ----------------------------------------
         // Sample `batch_size` random image indices uniformly from [0, N).
-        let index_tensor = Tensor::rand(
-            0.0f32,
-            total_samples as f32 - 1e-4,
-            (batch_size,),
-            &device,
-        )?
-        .to_dtype(DType::U32)?;
+        let index_tensor =
+            Tensor::rand(0.0f32, total_samples as f32 - 1e-4, (batch_size,), &device)?
+                .to_dtype(DType::U32)?;
 
         let indices = index_tensor.to_vec1::<u32>()?;
         let x0 = images.index_select(&index_tensor, 0)?;
@@ -289,7 +285,7 @@ pub fn main() -> Result<()> {
         // and L2 gradient norms for each of the 12 parameter tensors.
         if epoch % 100 == 0 || epoch == 1 {
             let elapsed = start_time.elapsed().as_secs_f32();
-            let speed   = epoch as f32 / elapsed;  // steps per second
+            let speed = epoch as f32 / elapsed; // steps per second
 
             // Compute L2 norm for each gradient tensor.
             let param_names = cnn.param_names();
@@ -306,7 +302,12 @@ pub fn main() -> Result<()> {
 
             println!(
                 "Epoch {:5}/{} - MSE Loss: {:.6} | Speed: {:.1} steps/s | Elapsed: {:.1}s | {}",
-                epoch, epochs, loss, speed, elapsed, norms_str.join(", ")
+                epoch,
+                epochs,
+                loss,
+                speed,
+                elapsed,
+                norms_str.join(", ")
             );
         }
     }

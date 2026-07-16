@@ -1,6 +1,7 @@
 use anyhow::{bail, Ok, Result};
 use candle_core::{DType, Device, Tensor};
 
+use super::attention::SpatialSelfAttention;
 use super::denoising_cnn_ops::{manual_conv2d, manual_conv2d_backward};
 use super::DenoisingModel;
 
@@ -98,6 +99,8 @@ pub struct SimpleDenoisingUNet {
 
     pub w5: Tensor, // [1,16,3,3]
     pub b5: Tensor, // [1]
+
+    pub attn: SpatialSelfAttention,
 }
 
 impl SimpleDenoisingUNet {
@@ -140,6 +143,8 @@ impl SimpleDenoisingUNet {
         let scale5 = (2.0f64 / (16.0 * 3.0 * 3.0)).sqrt();
         let w5 = (Tensor::randn(0.0f32, 1.0f32, (1, 16, 3, 3), device)? * scale5)?;
         let b5 = Tensor::zeros(1, DType::F32, device)?;
+        let attn = SpatialSelfAttention::new(32, device)?;
+
         Ok(Self {
             img_dim,
             cond_dim,
@@ -155,6 +160,7 @@ impl SimpleDenoisingUNet {
             b4,
             w5,
             b5,
+            attn,
         })
     }
 }
@@ -205,8 +211,9 @@ impl DenoisingModel for SimpleDenoisingUNet {
         let z3_conv = manual_conv2d(&a2, &self.w3, Some(&self.b3), &device)?;
         let z3_res = z3_conv.add(&a2)?.affine(RESIDUAL_SCALE, 0.0)?;
         let (z3, z3_hat, z3_inv_std) = group_norm_forward(&z3_res, 4)?;
-        let a3 = leaky_relu(&z3)?;
-
+        let a3_pre = leaky_relu(&z3)?;
+        // Apply self-attention at the bottleneck
+        let (a3, attn_cached) = self.attn.forward(&a3_pre)?;
         // decoder level(28*28)
 
         let a3_up = a3
@@ -226,10 +233,11 @@ impl DenoisingModel for SimpleDenoisingUNet {
         // conv5
         let z5 = manual_conv2d(&a4, &self.w5, Some(&self.b5), &device)?;
         let pred = z5.reshape((b, self.img_dim))?;
-        let intermediates = vec![
+        let mut intermediates = vec![
             input_cat, z1, z1_hat, z1_inv_std, a1, a1_down, z2, z2_hat, z2_inv_std, a2, z3, z3_hat,
             z3_inv_std, a3, a3_up, decode_cat, z4, z4_hat, z4_inv_std, a4,
         ];
+        intermediates.extend(attn_cached);
         Ok((pred, intermediates))
     }
     fn backward(
@@ -239,9 +247,9 @@ impl DenoisingModel for SimpleDenoisingUNet {
         pred: &Tensor,
         target: &Tensor,
     ) -> Result<Vec<Tensor>> {
-        if intermediates.len() != 20 {
+        if intermediates.len() != 26 {
             bail!(
-                "SimpleDenoisingUNet expected 20 cached intermediates from forward(), got {}",
+                "SimpleDenoisingUNet expected 26 cached intermediates from forward(), got {}",
                 intermediates.len()
             );
         }
@@ -331,10 +339,16 @@ impl DenoisingModel for SimpleDenoisingUNet {
             .sum(5)?
             .sum(3)?;
 
-        //7.leaky relu backward on z3
+        //7. Attention backward
+        // Backpropagate through attention layer
+        let (delta_a3_pre, d_wq, d_wk, d_wv) =
+            self.attn
+                .backward(&intermediates[20..26], &delta_a3)?;
+
+        //8. Leaky relu backward on z3
 
         let relu_grad3 = leaky_relu_grad(z3)?;
-        let delta_z3 = delta_a3.mul(&relu_grad3)?;
+        let delta_z3 = delta_a3_pre.mul(&relu_grad3)?;
         let delta_z3_norm = group_norm_backward(&delta_z3, z3_hat, z3_inv_std, 4)?;
         let delta_z3_conv = delta_z3_norm.affine(RESIDUAL_SCALE, 0.0)?;
         let delta_a2_from_bottleneck_residual = delta_z3_norm.affine(RESIDUAL_SCALE, 0.0)?;
@@ -387,7 +401,7 @@ impl DenoisingModel for SimpleDenoisingUNet {
         let dw_cond = delta_cond_flat.t()?.contiguous()?.matmul(&cond_vec)?;
 
         Ok(vec![
-            dw_cond, db_cond, dw1, db1, dw2, db2, dw3, db3, dw4, db4, dw5, db5,
+            dw_cond, db_cond, dw1, db1, dw2, db2, dw3, db3, dw4, db4, dw5, db5, d_wq, d_wk, d_wv,
         ])
     }
     fn params(&self) -> Vec<&Tensor> {
@@ -404,6 +418,9 @@ impl DenoisingModel for SimpleDenoisingUNet {
             &self.b4,
             &self.w5,
             &self.b5,
+            &self.attn.w_q,
+            &self.attn.w_k,
+            &self.attn.w_v,
         ]
     }
     fn params_mut(&mut self) -> Vec<&mut Tensor> {
@@ -420,11 +437,15 @@ impl DenoisingModel for SimpleDenoisingUNet {
             &mut self.b4,
             &mut self.w5,
             &mut self.b5,
+            &mut self.attn.w_q,
+            &mut self.attn.w_k,
+            &mut self.attn.w_v,
         ]
     }
     fn param_names(&self) -> Vec<&str> {
         vec![
             "w_cond", "b_cond", "w1", "b1", "w2", "b2", "w3", "b3", "w4", "b4", "w5", "b5",
+            "attn_w_q", "attn_w_k", "attn_w_v",
         ]
     }
 }
