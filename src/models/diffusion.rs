@@ -11,6 +11,8 @@
 
 pub mod attention;
 pub mod cfg_training;
+// Named SafeTensors persistence for any DenoisingModel implementation.
+pub mod checkpoint;
 pub mod denoising_cnn;
 pub mod denoising_cnn_5layers;
 pub mod denoising_cnn_ops;
@@ -21,9 +23,15 @@ pub mod scheduler;
 pub mod time_embedding;
 pub mod unet;
 
+#[cfg(test)]
+// Cross-module reverse-sampling regressions use a deliberately empty model.
+mod sampling_tests;
+
 pub use crate::common::optimizers::MlpAdamOptimizer;
 pub use attention::SpatialSelfAttention;
 pub use cfg_training::{make_one_hot_cfg, one_hot_class};
+// Re-export persistence beside the model APIs used by training binaries.
+pub use checkpoint::{load_model_checkpoint, save_model_checkpoint};
 pub use denoising_cnn::SimpleDenoisingCNN;
 pub use denoising_cnn_5layers::SimpleDenoisingCNN5Layers;
 pub use denoising_mlp::{Gradients, SimpleDenoisingMlp};

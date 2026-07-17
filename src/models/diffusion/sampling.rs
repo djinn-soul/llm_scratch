@@ -1,4 +1,4 @@
-use anyhow::{Ok, Result};
+use anyhow::{bail, Ok, Result};
 use candle_core::{Device, Tensor};
 
 use super::{get_time_embedding, BetaScheduler, DenoisingModel};
@@ -137,7 +137,7 @@ fn ddpm_reverse_step(
     // It comes from rearranging the DDPM reverse posterior mean. Dividing by
     // sqrt(1 - alpha_bar_t) re-scales the model's full-noise prediction back
     // to the correct amplitude for this specific timestep.
-    let eps_coef = beta / (1.0 - alpha_bar).sqrt();
+    let eps_coef = reverse_epsilon_coefficient(beta, alpha_bar, t_step)?;
 
     // Step R7: Compute the DDPM reverse posterior mean.
     //
@@ -265,7 +265,7 @@ pub fn sample_ddpm_cond(
         // --- Step 6: Epsilon scaling coefficient ----------------------------
         // eps_coef = beta_t / sqrt(1 - alpha_bar_t)
         // Re-scales the noise prediction to the correct amplitude for this step.
-        let eps_coef = beta / (1.0 - alpha_bar).sqrt();
+        let eps_coef = reverse_epsilon_coefficient(beta, alpha_bar, t_step)?;
 
         // --- Step 7: Reverse posterior mean ---------------------------------
         // mu_theta(x_t, t) = (1/sqrt(alpha_t)) * (x_t - eps_coef * epsilon_hat)
@@ -337,10 +337,40 @@ pub fn sample_ddpm_cfg(
     guidance_scale: f64,
     device: &Device,
 ) -> Result<Tensor> {
-    sample_ddpm_cfg_with_callback(
+    // Preserve the original public API: callers that do not request a partial
+    // trajectory always begin at the scheduler's final timestep.
+    sample_ddpm_cfg_from_timestep(
         model,
         scheduler,
         xt,
+        scheduler.steps - 1,
+        img_dim,
+        time_emb_dim,
+        class_one_hot,
+        guidance_scale,
+        device,
+    )
+}
+
+// Run classifier-free guidance from an explicit timestep without collecting
+// intermediate frames. This is useful for reconstruction diagnostics where xt
+// was created at a known t and must not be denoised as if it came from T - 1.
+pub fn sample_ddpm_cfg_from_timestep(
+    model: &dyn DenoisingModel,
+    scheduler: &BetaScheduler,
+    xt: Tensor,
+    start_timestep: usize,
+    img_dim: usize,
+    time_emb_dim: usize,
+    class_one_hot: &Tensor,
+    guidance_scale: f64,
+    device: &Device,
+) -> Result<Tensor> {
+    sample_ddpm_cfg_from_timestep_with_callback(
+        model,
+        scheduler,
+        xt,
+        start_timestep,
         img_dim,
         time_emb_dim,
         class_one_hot,
@@ -350,10 +380,46 @@ pub fn sample_ddpm_cfg(
     )
 }
 
+// Backward-compatible full-chain callback wrapper. Keeping delegation here
+// gives every CFG entrypoint one implementation of the reverse mathematics.
 pub fn sample_ddpm_cfg_with_callback<F>(
     model: &dyn DenoisingModel,
     scheduler: &BetaScheduler,
+    xt: Tensor,
+    img_dim: usize,
+    time_emb_dim: usize,
+    class_one_hot: &Tensor,
+    guidance_scale: f64,
+    device: &Device,
+    on_step: F,
+) -> Result<Tensor>
+where
+    F: FnMut(usize, &Tensor) -> Result<()>,
+{
+    sample_ddpm_cfg_from_timestep_with_callback(
+        model,
+        scheduler,
+        xt,
+        scheduler.steps - 1,
+        img_dim,
+        time_emb_dim,
+        class_one_hot,
+        guidance_scale,
+        device,
+        on_step,
+    )
+}
+
+// Core CFG reverse loop.
+//
+// `start_timestep` is inclusive: t=6 performs seven updates ending at t=0.
+// The callback receives a forward-running frame index (0, 1, ...) rather than
+// the decreasing diffusion timestep, which makes filenames naturally sortable.
+pub fn sample_ddpm_cfg_from_timestep_with_callback<F>(
+    model: &dyn DenoisingModel,
+    scheduler: &BetaScheduler,
     mut xt: Tensor,
+    start_timestep: usize,
     img_dim: usize,
     time_emb_dim: usize,
     class_one_hot: &Tensor,
@@ -364,6 +430,13 @@ pub fn sample_ddpm_cfg_with_callback<F>(
 where
     F: FnMut(usize, &Tensor) -> Result<()>,
 {
+    if start_timestep >= scheduler.steps {
+        bail!(
+            "start timestep {} is outside scheduler range 0..{}",
+            start_timestep,
+            scheduler.steps
+        );
+    }
     let num_samples = xt.dim(0)?;
 
     // Pre-extract schedule coefficients into plain Vecs for O(1) indexed access.
@@ -371,6 +444,7 @@ where
     let betas = scheduler.betas.to_vec1::<f32>()?;
     let alphas = scheduler.alphas.to_vec1::<f32>()?;
     let alphas_cumprod = scheduler.alphas_cumprod.to_vec1::<f32>()?;
+    let alphas_cumprod_prev = scheduler.alphas_cumprod_prev.to_vec1::<f32>()?;
     let sigmas = scheduler.sigmas.to_vec1::<f32>()?;
 
     // Build the "null" (unconditional) conditioning vector once.
@@ -386,7 +460,7 @@ where
     // --- Reverse diffusion loop: t = T-1 → 0 --------------------------------
     // WHY iterate in reverse? The forward process adds noise (x_0 → x_T).
     //                         The reverse process removes noise (x_T → x_0).
-    for t_step in (0..scheduler.steps).rev() {
+    for t_step in (0..=start_timestep).rev() {
         // Step 1: Build the timestep tensor for this reverse step.
         // Same value repeated for all samples in the batch.
         let t_vec = vec![t_step as u32; num_samples];
@@ -420,49 +494,33 @@ where
 
         // Step 5: Compute the CFG-modified noise prediction.
         //
-        // Formula:
-        //   epsilon_guided = epsilon_cond + s * (epsilon_cond - epsilon_uncond)
+        // Standard CFG formula:
+        //   epsilon_guided = epsilon_uncond + s * (epsilon_cond - epsilon_uncond)
         //
         // Expanded:
-        //   epsilon_guided = (1 + s) * epsilon_cond - s * epsilon_uncond
+        //   epsilon_guided = s * epsilon_cond + (1 - s) * epsilon_uncond
         //
-        // WHY add rather than interpolate?
-        //   Standard linear interpolation with s in [0,1] would only go from
-        //   unconditional to conditional.  CFG *extrapolates* beyond the
-        //   conditional prediction (s > 0), which is why it can produce more
-        //   class-faithful samples than conditional sampling alone.
-        let pred_noise = pred_cond.add(
-            &pred_cond
-                .sub(&pred_uncond)? // (epsilon_cond - epsilon_uncond)
-                .affine(guidance_scale, 0.0)?, // * s
-        )?;
+        // s=0 is unconditional, s=1 is ordinary conditional prediction, and
+        // s>1 extrapolates toward stronger class conditioning.
+        let pred_noise = combine_cfg_predictions(&pred_cond, &pred_uncond, guidance_scale)?;
 
         // Step 6: Retrieve schedule coefficients for this timestep.
         //   beta      = beta_t: noise variance for this step
         //   alpha     = alpha_t = 1 - beta_t
         //   alpha_bar = cumulative product of alpha values up to t
-        //   sigma     = sqrt(beta_t) — stochastic term std dev
+        //   sigma     = sqrt(beta_tilde) — exact posterior standard deviation
         let beta = betas[t_step];
         let alpha = alphas[t_step];
         let alpha_bar = alphas_cumprod[t_step];
+        let alpha_bar_prev = alphas_cumprod_prev[t_step];
         let sigma = sigmas[t_step];
 
-        // Step 7: Epsilon coefficient for the reverse posterior mean.
-        //   eps_coef = beta_t / sqrt(1 - alpha_bar_t)
-        //
-        // Re-scales the guided noise prediction to the correct amplitude for
-        // subtracting from x_t.
-        let eps_coef = beta / (1.0 - alpha_bar).sqrt();
-
-        // Step 8: Compute the reverse posterior mean.
-        //
-        //   mean = (1 / sqrt(alpha_t)) * (x_t - eps_coef * epsilon_guided)
-        //
-        // This is the same DDPM posterior mean formula but with the
-        // CFG-modified epsilon_guided in place of the raw model output.
-        let mean = xt
-            .sub(&pred_noise.affine(eps_coef as f64, 0.0)?)?
-            .affine((1.0 / alpha.sqrt()) as f64, 0.0)?;
+        // Step 7: Recover x_0, constrain it to the normalized image domain,
+        // then use the exact DDPM posterior mean. The algebraically equivalent
+        // epsilon-only form can magnify small high-noise prediction errors far
+        // outside [-1, 1], especially at the terminal cosine step.
+        let mean =
+            clipped_ddpm_posterior_mean(&xt, &pred_noise, beta, alpha, alpha_bar, alpha_bar_prev)?;
 
         // Step 9: Add stochasticity for all non-final steps.
         //
@@ -482,9 +540,127 @@ where
             xt = mean;
         }
 
-        let frame_idx = scheduler.steps - 1 - t_step;
+        let frame_idx = start_timestep - t_step;
         on_step(frame_idx, &xt)?;
     }
-
     Ok(xt)
+}
+
+fn combine_cfg_predictions(
+    conditional: &Tensor,
+    unconditional: &Tensor,
+    guidance_scale: f64,
+) -> Result<Tensor> {
+    // epsilon = epsilon_uncond + s * (epsilon_cond - epsilon_uncond)
+    //
+    // The endpoints are valuable invariants: s=0 must reproduce unconditional
+    // prediction exactly, while s=1 must reproduce ordinary conditioning.
+    Ok(unconditional.add(
+        &conditional
+            .sub(unconditional)?
+            .affine(guidance_scale, 0.0)?,
+    )?)
+}
+
+fn clipped_ddpm_posterior_mean(
+    xt: &Tensor,
+    predicted_noise: &Tensor,
+    beta: f32,
+    alpha: f32,
+    alpha_bar: f32,
+    alpha_bar_prev: f32,
+) -> Result<Tensor> {
+    // Recover the clean-image estimate implied by the epsilon prediction:
+    //
+    //   x0_hat = (xt - sqrt(1 - alpha_bar_t) * epsilon) / sqrt(alpha_bar_t)
+    //
+    // A weak predictor can make x0_hat enormous near the noisy end of a cosine
+    // schedule, where alpha_bar is tiny. Dynamic thresholding is common in
+    // larger systems; for normalized MNIST, clipping to the known [-1, 1]
+    // training domain is the direct equivalent.
+    let predicted_x0 = xt
+        .sub(&predicted_noise.affine((1.0 - alpha_bar).sqrt() as f64, 0.0)?)?
+        .affine((1.0 / alpha_bar.sqrt()) as f64, 0.0)?
+        .clamp(-1.0f32, 1.0f32)?;
+    // Exact q(x_{t-1} | xt, x0_hat) posterior-mean coefficients:
+    //
+    //   c_x0 = beta_t * sqrt(alpha_bar_{t-1}) / (1 - alpha_bar_t)
+    //   c_xt = sqrt(alpha_t) * (1 - alpha_bar_{t-1}) / (1 - alpha_bar_t)
+    let denominator = 1.0 - alpha_bar;
+    let x0_coefficient = beta * alpha_bar_prev.sqrt() / denominator;
+    let xt_coefficient = (1.0 - alpha_bar_prev) * alpha.sqrt() / denominator;
+
+    predicted_x0
+        .affine(x0_coefficient as f64, 0.0)?
+        .add(&xt.affine(xt_coefficient as f64, 0.0)?)
+        .map_err(Into::into)
+}
+
+fn reverse_epsilon_coefficient(beta: f32, alpha_bar: f32, timestep: usize) -> Result<f32> {
+    // Validate at the point of construction so callers cannot quietly propagate
+    // NaN into every later reverse step and eventually encode it as a PNG.
+    let coefficient = beta / (1.0 - alpha_bar).sqrt();
+    if !coefficient.is_finite() {
+        bail!(
+            "non-finite reverse coefficient at timestep {}: beta={}, alpha_bar={}",
+            timestep,
+            beta,
+            alpha_bar
+        );
+    }
+    Ok(coefficient)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        clipped_ddpm_posterior_mean, combine_cfg_predictions, reverse_epsilon_coefficient,
+    };
+    use candle_core::{Device, Tensor};
+
+    #[test]
+    fn reverse_coefficient_rejects_invalid_schedule_boundary() {
+        // This is the exact beta_0=0, alpha_bar_0=1 boundary that previously
+        // evaluated as 0/sqrt(0).
+        assert!(reverse_epsilon_coefficient(0.0, 1.0, 0).is_err());
+    }
+
+    #[test]
+    fn cfg_scale_zero_is_unconditional_and_one_is_conditional() -> anyhow::Result<()> {
+        let conditional = Tensor::new(&[2.0f32, 4.0], &Device::Cpu)?;
+        let unconditional = Tensor::new(&[1.0f32, 3.0], &Device::Cpu)?;
+
+        // Test semantic endpoints rather than one arbitrary scale; these catch
+        // the common off-by-one CFG convention where s=0 means conditional.
+        assert_eq!(
+            combine_cfg_predictions(&conditional, &unconditional, 0.0)?.to_vec1::<f32>()?,
+            vec![1.0, 3.0]
+        );
+        assert_eq!(
+            combine_cfg_predictions(&conditional, &unconditional, 1.0)?.to_vec1::<f32>()?,
+            vec![2.0, 4.0]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn clipped_posterior_bounds_terminal_cosine_update() -> anyhow::Result<()> {
+        let xt = Tensor::new(&[2.0f32, -3.0], &Device::Cpu)?;
+        let predicted_noise = Tensor::new(&[0.0f32, 0.0], &Device::Cpu)?;
+        // Terminal cosine coefficients deliberately stress alpha_bar close to
+        // zero. The clipped-x0 path should remain bounded instead of amplifying
+        // xt by roughly 1/sqrt(alpha_t).
+        let mean = clipped_ddpm_posterior_mean(
+            &xt,
+            &predicted_noise,
+            0.999,
+            0.001,
+            0.000_000_24,
+            0.000_24,
+        )?
+        .to_vec1::<f32>()?;
+
+        assert!(mean.iter().all(|value| value.abs() < 0.2));
+        Ok(())
+    }
 }

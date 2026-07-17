@@ -28,11 +28,11 @@ impl SpatialSelfAttention {
         let k = self.w_k.broadcast_matmul(&x_seq)?;
         let v = self.w_v.broadcast_matmul(&x_seq)?;
 
-        // 3. Compute attention scores: S = (K^T @ Q) / sqrt(C)
+        // 3. Compute attention scores: S = (Q^T @ K) / sqrt(C)
         let scale = 1.0 / (c as f64).sqrt();
-        let scores = k
+        let scores = q
             .transpose(1, 2)?
-            .broadcast_matmul(&q)?
+            .broadcast_matmul(&k)?
             .affine(scale, 0.0)?;
 
         // 4. Softmax over key dimension (dim 2)
@@ -82,10 +82,10 @@ impl SpatialSelfAttention {
 
         // 3. Gradients w.r.t Q and K
         let scale = 1.0 / (c as f64).sqrt();
-        let delta_q = k.broadcast_matmul(&delta_s)?.affine(scale, 0.0)?;
-        let delta_k = q
+        let delta_q = k
             .broadcast_matmul(&delta_s.transpose(1, 2)?)?
             .affine(scale, 0.0)?;
+        let delta_k = q.broadcast_matmul(&delta_s)?.affine(scale, 0.0)?;
 
         // 4. Gradients w.r.t projection weights w_q, w_k, w_v
         let d_wq = delta_q.broadcast_matmul(&x_seq.transpose(1, 2)?)?.sum(0)?;
@@ -101,5 +101,60 @@ impl SpatialSelfAttention {
         let delta_x = delta_x_seq.reshape((b, c, h, w))?;
 
         Ok((delta_x, d_wq, d_wk, d_wv))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn attention_loss(
+        attention: &SpatialSelfAttention,
+        input: &Tensor,
+        delta: &Tensor,
+    ) -> Result<f32> {
+        let (output, _) = attention.forward(input)?;
+        Ok(output.mul(delta)?.sum_all()?.to_scalar::<f32>()?)
+    }
+
+    #[test]
+    fn attention_wq_backward_matches_finite_difference() -> Result<()> {
+        let device = &Device::Cpu;
+        let input = Tensor::new(&[[[[0.2f32, -0.4]], [[0.7, 0.1]]]], device)?;
+        let delta = Tensor::new(&[[[[0.3f32, -0.2]], [[-0.5, 0.4]]]], device)?;
+        let attention = SpatialSelfAttention::new(2, device)?;
+        let (_, cached) = attention.forward(&input)?;
+        let (_, analytic_wq, _, _) = attention.backward(&cached, &delta)?;
+        let analytic = analytic_wq.flatten_all()?.to_vec1::<f32>()?[0];
+
+        // Central finite difference approximates dL/dw with
+        // (L(w + eps) - L(w - eps)) / (2 * eps). Comparing one representative
+        // element is enough to catch the Q/K transpose error in this tiny case.
+        let epsilon = 1e-3f32;
+        let original = attention.w_q.flatten_all()?.to_vec1::<f32>()?;
+        let mut plus_values = original.clone();
+        let mut minus_values = original;
+        plus_values[0] += epsilon;
+        minus_values[0] -= epsilon;
+
+        let plus = SpatialSelfAttention {
+            w_q: Tensor::new(plus_values.as_slice(), device)?.reshape((2, 2))?,
+            w_k: attention.w_k.clone(),
+            w_v: attention.w_v.clone(),
+        };
+        let minus = SpatialSelfAttention {
+            w_q: Tensor::new(minus_values.as_slice(), device)?.reshape((2, 2))?,
+            w_k: attention.w_k.clone(),
+            w_v: attention.w_v.clone(),
+        };
+        let numeric = (attention_loss(&plus, &input, &delta)?
+            - attention_loss(&minus, &input, &delta)?)
+            / (2.0 * epsilon);
+
+        assert!(
+            (analytic - numeric).abs() < 2e-3,
+            "analytic={analytic}, numeric={numeric}"
+        );
+        Ok(())
     }
 }

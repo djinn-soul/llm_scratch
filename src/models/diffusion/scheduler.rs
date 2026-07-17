@@ -1,4 +1,4 @@
-use anyhow::{Ok, Result};
+use anyhow::{bail, Ok, Result};
 use candle_core::{DType, Device, Tensor};
 
 // DDPM BETA SCHEDULER
@@ -175,8 +175,11 @@ impl BetaScheduler {
         Ok(xt)
     }
     pub fn new_cosine(steps: usize, device: &Device) -> Result<Self> {
+        if steps == 0 {
+            bail!("cosine beta scheduler requires at least one step");
+        }
+
         let s = 0.008f64;
-        let mut alphas_cumprod_vec = Vec::with_capacity(steps);
 
         // f(t) = cos(((t/T + s) / (1 + s)) * pi/2)^2
         let f = |t_val: f64| {
@@ -186,24 +189,26 @@ impl BetaScheduler {
             angle.cos().powi(2)
         };
 
-        let f0 = f(0.0);
+        let mut betas_vec = Vec::with_capacity(steps);
         for t in 0..steps {
-            let alpha_bar = f(t as f64) / f0;
-            alphas_cumprod_vec.push(alpha_bar as f32);
+            // Each discrete beta spans [t, t + 1]. Starting with f(1)
+            // keeps beta_0 > 0 and prevents 0 / sqrt(0) at reverse step zero.
+            let beta = (1.0 - f(t as f64 + 1.0) / f(t as f64)).min(0.999);
+            betas_vec.push(beta as f32);
         }
 
-        let mut betas_vec = Vec::with_capacity(steps);
-        let mut prev_alpha_bar = 1.0f64;
-        for t in 0..steps {
-            let alpha_bar = alphas_cumprod_vec[t] as f64;
-            // beta_t = 1 - alpha_bar_t / alpha_bar_{t-1}
-            let beta = (1.0 - (alpha_bar / prev_alpha_bar)).min(0.999);
-            betas_vec.push(beta as f32);
-            prev_alpha_bar = alpha_bar;
+        // Derive alpha_bar from the clipped betas actually used by the
+        // process so all stored schedule coefficients remain consistent.
+        let alphas_vec: Vec<f32> = betas_vec.iter().map(|beta| 1.0 - beta).collect();
+        let mut alphas_cumprod_vec = Vec::with_capacity(steps);
+        let mut alpha_bar = 1.0f32;
+        for alpha in &alphas_vec {
+            alpha_bar *= alpha;
+            alphas_cumprod_vec.push(alpha_bar);
         }
 
         let betas = Tensor::new(betas_vec.as_slice(), device)?;
-        let alphas = Tensor::ones(steps, DType::F32, device)?.sub(&betas)?;
+        let alphas = Tensor::new(alphas_vec.as_slice(), device)?;
         let alphas_cumprod = Tensor::new(alphas_cumprod_vec.as_slice(), device)?;
 
         let mut alphas_cumprod_prev_vec = Vec::with_capacity(steps);
@@ -240,5 +245,39 @@ impl BetaScheduler {
             sqrt_one_minus_alphas_cumprod,
             sigmas,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cosine_schedule_has_finite_reverse_boundary() -> Result<()> {
+        let scheduler = BetaScheduler::new_cosine(100, &Device::Cpu)?;
+        let betas = scheduler.betas.to_vec1::<f32>()?;
+        let alphas = scheduler.alphas.to_vec1::<f32>()?;
+        let alpha_bars = scheduler.alphas_cumprod.to_vec1::<f32>()?;
+
+        // The first assertions guard the former t=0 NaN. The product loop then
+        // verifies a subtler invariant: alpha_bar must be derived from the same
+        // clipped betas stored in the scheduler.
+        assert!(betas[0] > 0.0);
+        assert!(alpha_bars[0] < 1.0);
+        assert!((betas[0] / (1.0 - alpha_bars[0]).sqrt()).is_finite());
+        assert!(betas.iter().all(|value| value.is_finite()));
+        assert!(alpha_bars.iter().all(|value| value.is_finite()));
+
+        let mut product = 1.0f32;
+        for (alpha, alpha_bar) in alphas.iter().zip(alpha_bars.iter()) {
+            product *= alpha;
+            assert!((product - alpha_bar).abs() < 1e-6);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cosine_schedule_rejects_zero_steps() {
+        assert!(BetaScheduler::new_cosine(0, &Device::Cpu).is_err());
     }
 }

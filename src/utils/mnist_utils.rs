@@ -18,6 +18,10 @@ use std::fs::{create_dir_all, File};
 use std::io::{BufReader, Read};
 use std::path::Path;
 
+// Preserve the long-standing `mnist_utils::save_png` import path while the
+// encoder lives in a focused module with its own validation tests.
+pub use super::image_io::save_png;
+
 // =============================================================================
 // acquire_mnist_images — download (once) and load the training image file
 // =============================================================================
@@ -256,48 +260,4 @@ pub fn make_one_hot(labels: &[u8], device: &Device) -> Result<Tensor> {
         (labels.len(), num_classes),
         device,
     )?)
-}
-
-// =============================================================================
-// save_png — write a 28×28 grayscale image to disk as PNG
-// =============================================================================
-//
-// WHY a dedicated helper?
-//   Both training binaries need to save images (reference, noise, generated).
-//   Centralising the [-1,1] → u8 conversion avoids inconsistencies.
-//
-// Input `image_flat`:
-//   A flat slice of 784 f32 values in the range [-1.0, 1.0] as produced by
-//   the diffusion model (same normalisation used during training).
-//
-// Conversion:
-//   pixel_u8 = round( clamp((val + 1.0) / 2.0, 0, 1) * 255 )
-//   The `clamp` handles the common case where the model output slightly
-//   overshoots the [-1, 1] range.
-pub fn save_png(path: &str, image_flat: &[f32]) -> Result<()> {
-    use std::io::BufWriter;
-
-    let file = File::create(path)?;
-    // BufWriter batches encoder writes to reduce the number of syscalls.
-    let ref mut w = BufWriter::new(file);
-
-    // Configure PNG: 28×28 pixels, single grayscale channel, 8-bit depth.
-    let mut encoder = png::Encoder::new(w, 28, 28);
-    encoder.set_color(png::ColorType::Grayscale);
-    encoder.set_depth(png::BitDepth::Eight);
-    let mut writer = encoder.write_header()?;
-
-    // Map model output values to byte range.
-    let mut data = vec![0u8; 784];
-    for (i, &val) in image_flat.iter().enumerate() {
-        // (val + 1) / 2 maps [-1, 1] → [0, 1]
-        let norm = ((val + 1.0) / 2.0).clamp(0.0, 1.0);
-        // * 255 maps [0, 1] → [0, 255]
-        data[i] = (norm * 255.0).round() as u8;
-    }
-
-    // Write pixel data; the PNG encoder handles chunk framing and CRC checksums.
-    writer.write_image_data(&data)?;
-    println!("Saved image to: {}", path);
-    Ok(())
 }

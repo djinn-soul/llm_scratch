@@ -342,8 +342,7 @@ impl DenoisingModel for SimpleDenoisingUNet {
         //7. Attention backward
         // Backpropagate through attention layer
         let (delta_a3_pre, d_wq, d_wk, d_wv) =
-            self.attn
-                .backward(&intermediates[20..26], &delta_a3)?;
+            self.attn.backward(&intermediates[20..26], &delta_a3)?;
 
         //8. Leaky relu backward on z3
 

@@ -5,12 +5,14 @@
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 
-use llm_scratch_rs::models::diffusion::sampling::{sample_ddpm_cfg, sample_ddpm_cfg_with_callback};
+use llm_scratch_rs::models::diffusion::sampling::{
+    sample_ddpm_cfg_from_timestep, sample_ddpm_cfg_from_timestep_with_callback,
+};
 
 // Model components:
 use llm_scratch_rs::models::diffusion::{
-    get_time_embedding, make_one_hot_cfg, one_hot_class, BetaScheduler, DenoisingModel,
-    MlpAdamOptimizer, SimpleDenoisingUNet,
+    get_time_embedding, make_one_hot_cfg, one_hot_class, save_model_checkpoint, BetaScheduler,
+    DenoisingModel, MlpAdamOptimizer, SimpleDenoisingUNet,
 };
 
 // Shared MNIST dataset loader and PNG writer.
@@ -18,6 +20,11 @@ use llm_scratch_rs::utils::mnist_utils::{acquire_mnist, save_png};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+// The cosine scheduler has 100 entries indexed 0..99. Keeping the diagnostic
+// start explicit makes it difficult to accidentally pass the step count (100)
+// as an index, and lets reconstruction helpers share the partial-chain API.
+const SAMPLING_START_TIMESTEP: usize = 99;
 
 // =============================================================================
 // save_cfg_sample — helper: generate one image at a given guidance scale
@@ -33,10 +40,11 @@ fn save_cfg_sample(
     device: &Device,
 ) -> Result<()> {
     let initial_noise = Tensor::randn(0.0f32, 1.0f32, (1, img_dim), device)?;
-    let generated = sample_ddpm_cfg(
+    let generated = sample_ddpm_cfg_from_timestep(
         model,
         scheduler,
         initial_noise,
+        SAMPLING_START_TIMESTEP,
         img_dim,
         time_emb_dim,
         target_one_hot,
@@ -67,10 +75,11 @@ fn save_cfg_sample_frames(
     let initial_noise = Tensor::randn(0.0f32, 1.0f32, (1, img_dim), device)?;
     let class_one_hot = one_hot_class(class_label as usize, 10, device)?;
 
-    sample_ddpm_cfg_with_callback(
+    sample_ddpm_cfg_from_timestep_with_callback(
         model,
         scheduler,
         initial_noise,
+        SAMPLING_START_TIMESTEP,
         img_dim,
         time_emb_dim,
         &class_one_hot,
@@ -145,11 +154,22 @@ fn save_fixed_noise_checkpoint(
     device: &Device,
 ) -> Result<()> {
     std::fs::create_dir_all("unet_checkpoints")?;
+    // Save actual weights beside each preview. A PNG alone cannot be re-sampled
+    // after correcting sampler code, and therefore cannot distinguish model
+    // quality from a historical inference bug.
+    save_model_checkpoint(
+        model,
+        format!("unet_checkpoints/epoch_{epoch:04}.safetensors"),
+    )?;
+    // Reuse one noise tensor across epochs so visible changes come from learned
+    // parameters rather than a different starting point.
+    fixed_noise.save_safetensors("fixed_noise", "unet_checkpoints/fixed_noise.safetensors")?;
 
-    let generated = sample_ddpm_cfg(
+    let generated = sample_ddpm_cfg_from_timestep(
         model,
         scheduler,
         fixed_noise.clone(),
+        SAMPLING_START_TIMESTEP,
         img_dim,
         time_emb_dim,
         class_one_hot,
@@ -268,7 +288,10 @@ fn main() -> Result<()> {
                 &scheduler,
                 &checkpoint_noise,
                 &class_one_hot,
-                3.0,
+                // Standard CFG semantics: s=1 is the conditional prediction.
+                // Larger values intentionally extrapolate and are a separate
+                // quality/fidelity experiment, not the neutral checkpoint view.
+                1.0,
                 epoch,
                 img_dim,
                 time_emb_dim,
@@ -329,7 +352,7 @@ fn main() -> Result<()> {
         img_dim,
         time_emb_dim,
         sample_class,
-        3.0,
+        1.0,
         "unet_frames",
         &device,
     )?;
