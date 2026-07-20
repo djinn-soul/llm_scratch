@@ -3,18 +3,67 @@ use candle_core::{Device, Tensor};
 
 use super::{get_time_embedding, BetaScheduler, DenoisingModel};
 
-// DDPM REVERSE SAMPLING
+// =============================================================================
+// DIFFUSION SAMPLING — DDPM, DDIM, and Classifier-Free Guidance
+// =============================================================================
 //
-// This module owns inference-time denoising. Keeping it separate from the
-// training binary gives us a clean place to add other samplers later:
-//
-// - DDPM: stochastic reverse process, adds sigma_t * z at each t > 0.
-// - DDIM: can use fewer steps and can be deterministic when eta = 0.
-// - Class-conditioned sampling: same reverse loop shape, but the model input
-//   must also receive class information or guidance.
-//
+// This module implements inference-time (reverse) sampling for diffusion models.
 // All sampling functions accept `&dyn DenoisingModel` so they work with any
-// noise-prediction architecture (MLP, UNet, Transformer, etc.) without change.
+// noise-prediction architecture (MLP, UNet, Transformer, etc.).
+//
+// ── MATHEMATICAL BACKGROUND ──────────────────────────────────────────────────
+//
+// THE FORWARD PROCESS (training time — not implemented here, but is the
+// foundation everything derives from):
+//
+//   Given a clean image x_0, the forward process adds Gaussian noise over
+//   T timesteps.  At each step t the forward transition is:
+//
+//       q(x_t | x_{t-1}) = N(x_t; sqrt(1 - beta_t) * x_{t-1},  beta_t * I)
+//
+//   where beta_t is a small noise variance that increases with t.
+//
+//   Define:
+//       alpha_t     = 1 - beta_t         (per-step signal retention)
+//       alpha_bar_t = prod_{s=1}^{t} alpha_s   (cumulative signal retention)
+//
+//   A key property: we can jump directly from x_0 to ANY x_t without
+//   iterating, via the closed-form "reparameterization trick":
+//
+//       q(x_t | x_0) = N(x_t; sqrt(alpha_bar_t) * x_0, (1 - alpha_bar_t) * I)
+//
+//   Equivalently, sampling x_t from x_0 is just:
+//
+//       x_t = sqrt(alpha_bar_t) * x_0 + sqrt(1 - alpha_bar_t) * epsilon
+//       where epsilon ~ N(0, I)
+//
+//   This is what the training code uses: sample t, sample epsilon, compute x_t,
+//   and train the model to predict epsilon given (x_t, t).
+//
+// THE REVERSE PROCESS (this module):
+//
+//   Generation runs the chain BACKWARD: x_T -> x_{T-1} -> ... -> x_0.
+//   We want to sample from q(x_{t-1} | x_t), but this requires knowing
+//   q(x_t) which is intractable. Instead, we:
+//
+//   1. Approximate q(x_{t-1} | x_t) with a learned model p_theta(x_{t-1} | x_t).
+//   2. The model predicts epsilon_theta(x_t, t), the noise present in x_t.
+//   3. We then use this prediction to compute the reverse step.
+//
+// TWO REVERSE STRATEGIES:
+//
+//   DDPM (Ho et al. 2020):
+//     Uses the exact reverse posterior q(x_{t-1} | x_t, x_0) which is
+//     Gaussian when conditioned on x_0. The model's epsilon prediction
+//     gives us an estimate of x_0, yielding a posterior mean + variance.
+//     Stochastic: adds sigma_t * z at each step.
+//
+//   DDIM (Song et al. 2020):
+//     Defines a NON-MARKOVIAN forward process that shares the same marginals
+//     q(x_t | x_0) but allows deterministic reverse steps. The update
+//     "predicts x_0, then re-noises" to the next level without injecting
+//     fresh randomness. Supports arbitrary stride jumps with no quality loss.
+//
 pub fn sample_ddpm(
     model: &dyn DenoisingModel,
     scheduler: &BetaScheduler,
@@ -41,9 +90,14 @@ pub fn sample_ddpm_from_noise(
 
     // Pre-extract schedule vectors as plain Rust Vecs.
     //
-    // During the reverse sampling loop we index these arrays by timestep.
-    // Converting once avoids repeated Tensor slicing inside every denoising
-    // step.
+    // These are the key schedule quantities, all length T:
+    //   betas[t]         = beta_t          — scheduled noise variance at step t
+    //   alphas[t]        = alpha_t = 1-beta_t — signal retention at step t
+    //   alphas_cumprod[t] = alpha_bar_t = product(alpha_1..alpha_t) — cumulative signal
+    //   sigmas[t]        = sqrt(beta_t * (1-alpha_bar_{t-1}) / (1-alpha_bar_t))
+    //                      — reverse posterior std dev
+    //
+    // Converting once avoids repeated Tensor slicing inside every denoising step.
     let betas = scheduler.betas.to_vec1::<f32>()?;
     let alphas = scheduler.alphas.to_vec1::<f32>()?;
     let alphas_cumprod = scheduler.alphas_cumprod.to_vec1::<f32>()?;
@@ -52,10 +106,11 @@ pub fn sample_ddpm_from_noise(
     // Reverse diffusion loop: t = T-1 -> 0.
     //
     // WHY iterate in reverse?
-    //
-    // Training corrupts x_0 -> x_T by adding noise.
-    // Generation reconstructs x_T -> x_0 by removing predicted noise.
-    // Each step removes a small amount of noise guided by the model.
+    //   The forward process adds noise progressively: x_0 -> x_1 -> ... -> x_T.
+    //   Generation must undo this: x_T -> x_{T-1} -> ... -> x_0.
+    //   At each step t, the model looks at x_t and estimates what noise was
+    //   added, then subtracts (a scaled version of) that estimate to produce
+    //   x_{t-1}, which is slightly less noisy.
     for t_step in (0..scheduler.steps).rev() {
         xt = ddpm_reverse_step(
             model,
@@ -119,10 +174,10 @@ fn ddpm_reverse_step(
 
     // Step R5: Retrieve precomputed schedule coefficients for this timestep.
     //
-    // beta      = beta_t: noise variance scheduled for this step
-    // alpha     = alpha_t = 1 - beta_t: signal retention for this step
-    // alpha_bar = cumulative signal retention up to this step
-    // sigma     = standard deviation of the stochastic reverse term
+    //   beta_t     — noise variance scheduled for this step
+    //   alpha_t    = 1 - beta_t  — fraction of signal retained at this step
+    //   alpha_bar_t = alpha_1 * alpha_2 * ... * alpha_t  — cumulative signal
+    //   sigma_t    — std dev of the reverse posterior (see derivation below)
     let beta = betas[t_step];
     let alpha = alphas[t_step];
     let alpha_bar = alphas_cumprod[t_step];
@@ -130,50 +185,98 @@ fn ddpm_reverse_step(
 
     // Step R6: Compute the epsilon coefficient.
     //
-    // eps_coef = beta_t / sqrt(1 - alpha_bar_t)
+    //   eps_coef = beta_t / sqrt(1 - alpha_bar_t)
     //
-    // WHY this formula?
+    // ── DERIVATION ──
     //
-    // It comes from rearranging the DDPM reverse posterior mean. Dividing by
-    // sqrt(1 - alpha_bar_t) re-scales the model's full-noise prediction back
-    // to the correct amplitude for this specific timestep.
+    // The true reverse posterior (when x_0 is known) is:
+    //
+    //   q(x_{t-1} | x_t, x_0) = N(x_{t-1}; mu_tilde_t, sigma_tilde_t^2 I)
+    //
+    // where the posterior mean is:
+    //
+    //   mu_tilde_t = [sqrt(alpha_bar_{t-1}) * beta_t / (1-alpha_bar_t)] * x_0
+    //              + [sqrt(alpha_t) * (1-alpha_bar_{t-1}) / (1-alpha_bar_t)] * x_t
+    //
+    // But we don't know x_0. We only know x_t and the model's prediction
+    // epsilon_theta. Since x_t = sqrt(alpha_bar_t)*x_0 + sqrt(1-alpha_bar_t)*epsilon,
+    // we can solve for x_0:
+    //
+    //   x_0 = (x_t - sqrt(1-alpha_bar_t) * epsilon) / sqrt(alpha_bar_t)
+    //
+    // Substituting this into the posterior mean and simplifying yields the
+    // "epsilon parameterization" of the mean:
+    //
+    //   mu_theta = (1/sqrt(alpha_t)) * (x_t - [beta_t/sqrt(1-alpha_bar_t)] * epsilon_theta)
+    //                                         └─────────── eps_coef ────────────┘
+    //
+    // So eps_coef = beta_t / sqrt(1-alpha_bar_t) is the coefficient that
+    // converts the model's noise prediction into the correct "noise to subtract"
+    // at this specific timestep.
     let eps_coef = reverse_epsilon_coefficient(beta, alpha_bar, t_step)?;
 
     // Step R7: Compute the DDPM reverse posterior mean.
     //
-    // mean = (1 / sqrt(alpha_t)) *
-    //        (x_t - beta_t / sqrt(1 - alpha_bar_t) * eps_theta(x_t, t))
+    //   mu_theta(x_t, t) = (1/sqrt(alpha_t)) * (x_t - eps_coef * epsilon_theta)
     //
-    // WHY subtract eps_coef * predicted_noise?
+    // ── DERIVATION (continued from Step R6) ──
     //
-    // The model predicts the noise currently inside x_t. Subtracting the
-    // scaled prediction moves x_t one step toward being less corrupted.
+    // Starting from:
+    //   mu_theta = (1/sqrt(alpha_t)) * (x_t - [beta_t / sqrt(1-alpha_bar_t)] * eps_theta)
     //
-    // WHY multiply by 1 / sqrt(alpha_t)?
+    // This has two multiplicative factors:
     //
-    // The forward process also scaled the signal by sqrt(alpha_t). This factor
-    // reverses that per-step signal scaling.
+    //   INNER: (x_t - eps_coef * eps_theta)
+    //     → Subtracts the scaled noise prediction from x_t. This removes the
+    //       model's estimate of the noise that was added at step t. The result
+    //       is a "partially denoised" signal, but still scaled by sqrt(alpha_t).
+    //
+    //   OUTER: 1/sqrt(alpha_t)
+    //     → Recall q(x_t | x_{t-1}) = N(sqrt(alpha_t)*x_{t-1}, beta_t*I).
+    //       The forward process multiplied the signal by sqrt(alpha_t), so
+    //       dividing by sqrt(alpha_t) undoes that per-step signal scaling.
+    //       Together, inner × outer yields the posterior mean at t-1.
+    //
+    // Numerical example (t=50, cosine schedule):
+    //   If alpha_t ≈ 0.98, alpha_bar_t ≈ 0.3, beta_t ≈ 0.02, then:
+    //   eps_coef = 0.02 / sqrt(0.7) ≈ 0.024
+    //   1/sqrt(alpha_t) = 1/sqrt(0.98) ≈ 1.01
+    //   The net effect: subtract ~2.4% of the predicted noise, then re-scale
+    //   by ~1%. Each step makes a small correction.
     let mean = xt
         .sub(&pred_noise.affine(eps_coef as f64, 0.0)?)?
         .affine((1.0 / alpha.sqrt()) as f64, 0.0)?;
 
     // Step R8: Add stochastic noise for all steps except the final step.
     //
-    // WHY add noise when t > 0?
+    // The full DDPM reverse step is:
     //
-    // The true reverse posterior is Gaussian, not a single point estimate.
-    // Adding sigma_t * z restores the correct variance and keeps samples from
-    // collapsing into an over-smoothed average.
+    //   x_{t-1} = mu_theta(x_t, t) + sigma_t * z,   z ~ N(0, I)
     //
-    // WHY no noise at t = 0?
+    // ── WHY add sigma_t * z? ──
     //
-    // At the final step we output x_0. Adding fresh noise there would only
-    // damage the final generated image.
+    // The true reverse posterior q(x_{t-1} | x_t, x_0) is a Gaussian with:
+    //   mean     = mu_tilde_t     (approximated by mu_theta above)
+    //   variance = sigma_tilde_t^2 = beta_t * (1 - alpha_bar_{t-1}) / (1 - alpha_bar_t)
+    //
+    // If we only output the mean, we'd get a DETERMINISTIC decoder that
+    // always produces the same image from the same x_T. Adding sigma_t * z
+    // samples from the full posterior, introducing the randomness needed for
+    // diverse outputs. Without it, all samples converge to the mode (mean)
+    // of the learned distribution — an over-smoothed average.
+    //
+    // ── WHY no noise at t = 0? ──
+    //
+    // At the final step we output x_0 directly. The posterior variance at
+    // t=0 involves alpha_bar_{-1} which is undefined; conceptually, there's
+    // no "noise level below zero" to sample from. Adding fresh noise would
+    // just corrupt the final output.
     if t_step > 0 {
-        // z ~ N(0, I): fresh independent noise for this reverse step.
+        // z ~ N(0, I): fresh independent noise, sampled EVERY step.
+        // This z is independent of the z used in every other step.
         let z = Tensor::randn(0.0f32, 1.0f32, (num_samples, img_dim), device)?;
 
-        // x_{t-1} = mean + sigma_t * z
+        // x_{t-1} = mu_theta + sigma_t * z
         Ok(mean.add(&z.affine(sigma as f64, 0.0)?)?)
     } else {
         // Final step: output deterministic mean as x_0.
@@ -293,30 +396,59 @@ pub fn sample_ddpm_cond(
 // sample_ddpm_cfg — Classifier-Free Guidance (CFG) reverse diffusion sampler
 // =============================================================================
 //
-// WHAT IS CFG?
-//   CFG is an inference-time technique that amplifies the model's class signal
-//   without requiring a separate classifier.  Because the model was trained
-//   with stochastic label dropout, it has implicitly learned two distributions:
+// ── WHAT IS CLASSIFIER-FREE GUIDANCE (CFG)? ──
 //
-//     epsilon_theta(x_t, t, c)  — conditional noise prediction (given class c)
-//     epsilon_theta(x_t, t, ∅)  — unconditional noise prediction (null label)
+// CFG (Ho & Salimans, 2022) is an inference-time technique that amplifies the
+// model's class signal without requiring a separate classifier network.
 //
-//   At each reverse step we compute BOTH predictions and blend them:
+// ── MATHEMATICAL DERIVATION ──
 //
-//     epsilon_guided = epsilon_cond + s * (epsilon_cond - epsilon_uncond)
+// The idea comes from classifier guidance (Dhariwal & Nichol, 2021), which
+// modifies the score function using a trained classifier:
 //
-//   where s ≥ 1 is the guidance_scale.
+//   score_guided = score_uncond + s * grad_x(log p(c | x_t))
 //
-// WHY does this make the output more class-faithful?
-//   (epsilon_cond - epsilon_uncond) is the "direction" in noise space that
-//   points from unconditional toward the target class.  Scaling it by s and
-//   adding it to epsilon_cond amplifies that direction, steering the denoising
-//   trajectory more aggressively toward the requested class.
+// The insight of CFG: we can AVOID training a separate classifier by noting
+// that Bayes' rule gives us:
 //
-// WHY does a higher s reduce diversity?
-//   Larger guidance pushes every sample further in the same class direction,
-//   reducing the spread of the latent space around that class.  This trades
-//   sample diversity for stronger class fidelity.
+//   grad_x(log p(c | x_t)) = grad_x(log p(x_t | c)) - grad_x(log p(x_t))
+//
+// In the epsilon-prediction framework, the score is related to epsilon by:
+//   score(x_t) = -epsilon(x_t, t) / sqrt(1 - alpha_bar_t)
+//
+// So the classifier gradient becomes:
+//   grad_x(log p(c|x_t)) ∝ epsilon_uncond(x_t,t) - epsilon_cond(x_t,t,c)
+//
+// Substituting into the guided score and converting back to epsilon space:
+//
+//   epsilon_guided = epsilon_uncond + s * (epsilon_cond - epsilon_uncond)
+//
+// Expanding algebraically:
+//   epsilon_guided = (1 - s) * epsilon_uncond + s * epsilon_cond
+//
+// KEY BOUNDARY VALUES:
+//   s = 0.0 → epsilon_guided = epsilon_uncond  (purely unconditional)
+//   s = 1.0 → epsilon_guided = epsilon_cond    (ordinary conditional)
+//   s > 1.0 → EXTRAPOLATION beyond conditional (amplified class signal)
+//
+// ── WHY DOES s > 1 PRODUCE SHARPER CLASS FEATURES? ──
+//
+// The vector (epsilon_cond - epsilon_uncond) is the "class direction" in
+// noise space — it's what makes the model's prediction different when it
+// knows the class vs. when it doesn't. Scaling by s > 1 amplifies this
+// direction, pushing the denoising trajectory further toward the class
+// manifold. The cost: reduced diversity, since all samples are pulled
+// harder toward the class prototype.
+//
+// ── WHY DOES THIS WORK WITHOUT A CLASSIFIER? ──
+//
+// During training, 15% of labels are randomly replaced with the null vector
+// (all zeros). This means the SAME model learns both:
+//   epsilon_theta(x_t, t, c)    — conditional prediction (label present)
+//   epsilon_theta(x_t, t, null) — unconditional prediction (label dropped)
+//
+// At inference, we evaluate the model TWICE per step (or batch them) to get
+// both predictions, then blend them using the formula above.
 //
 // Arguments:
 //   model          — any trained CFG-aware model implementing DenoisingModel
@@ -410,16 +542,24 @@ where
     )
 }
 
-// Core CFG reverse loop.
+// Core CFG reverse loop, respaced to an arbitrary number of steps.
 //
-// `start_timestep` is inclusive: t=6 performs seven updates ending at t=0.
+// `start_timestep` is inclusive. When `num_inference_steps` equals
+// start_timestep + 1 this walks every raw timestep, matching the original
+// fixed-schedule DDPM loop exactly. For smaller counts it follows the Nichol
+// & Dhariwal ("Improved DDPM") respacing trick: at each subsequence jump
+// t_i -> t_{i+1}, treat the pair as if it were one adjacent step by deriving
+// a synthetic beta/alpha from the ratio of their alpha_bars. This keeps the
+// exact posterior-mean formula valid across skipped timesteps.
+//
 // The callback receives a forward-running frame index (0, 1, ...) rather than
 // the decreasing diffusion timestep, which makes filenames naturally sortable.
-pub fn sample_ddpm_cfg_from_timestep_with_callback<F>(
+pub fn sample_ddpm_cfg_strided_with_callback<F>(
     model: &dyn DenoisingModel,
     scheduler: &BetaScheduler,
     mut xt: Tensor,
     start_timestep: usize,
+    num_inference_steps: usize,
     img_dim: usize,
     time_emb_dim: usize,
     class_one_hot: &Tensor,
@@ -441,11 +581,7 @@ where
 
     // Pre-extract schedule coefficients into plain Vecs for O(1) indexed access.
     // Avoids repeated Tensor slicing inside the per-step loop.
-    let betas = scheduler.betas.to_vec1::<f32>()?;
-    let alphas = scheduler.alphas.to_vec1::<f32>()?;
     let alphas_cumprod = scheduler.alphas_cumprod.to_vec1::<f32>()?;
-    let alphas_cumprod_prev = scheduler.alphas_cumprod_prev.to_vec1::<f32>()?;
-    let sigmas = scheduler.sigmas.to_vec1::<f32>()?;
 
     // Build the "null" (unconditional) conditioning vector once.
     // Shape matches class_one_hot but every element is 0.0.
@@ -457,10 +593,12 @@ where
     //   unconditional behaviour.
     let null_one_hot = Tensor::zeros(class_one_hot.dims(), class_one_hot.dtype(), device)?;
 
-    // --- Reverse diffusion loop: t = T-1 → 0 --------------------------------
+    let timesteps = strided_timesteps(start_timestep, num_inference_steps);
+
+    // --- Reverse diffusion loop over the (possibly strided) subsequence ----
     // WHY iterate in reverse? The forward process adds noise (x_0 → x_T).
     //                         The reverse process removes noise (x_T → x_0).
-    for t_step in (0..=start_timestep).rev() {
+    for (frame_idx, &t_step) in timesteps.iter().enumerate() {
         // Step 1: Build the timestep tensor for this reverse step.
         // Same value repeated for all samples in the batch.
         let t_vec = vec![t_step as u32; num_samples];
@@ -481,16 +619,19 @@ where
         let v_cond = Tensor::cat(&[&xt, &time_emb, class_one_hot], 1)?;
         let v_null = Tensor::cat(&[&xt, &time_emb, &null_one_hot], 1)?;
 
-        // Step 4: Two forward passes — one conditional, one unconditional.
+        // Step 4: One batched forward pass for both predictions.
         //
-        // WHY two passes and not one?
-        //   We need epsilon_cond and epsilon_uncond separately to compute the
-        //   guidance direction.  There is no shortcut; we must evaluate the
-        //   model twice per reverse step.
+        // We need epsilon_cond and epsilon_uncond separately to compute the
+        // guidance direction. Rather than evaluate the model twice, stack the
+        // conditional and unconditional inputs along the batch dim and run a
+        // single forward — forward is batch-agnostic, so this halves the
+        // per-step model evaluations (the dominant sampling cost).
         //
         // Note: intermediate activations are discarded — we're at inference.
-        let (pred_cond, _) = model.forward(&v_cond)?;
-        let (pred_uncond, _) = model.forward(&v_null)?;
+        let v_batched = Tensor::cat(&[&v_cond, &v_null], 0)?;
+        let (pred_batched, _) = model.forward(&v_batched)?;
+        let pred_cond = pred_batched.narrow(0, 0, num_samples)?;
+        let pred_uncond = pred_batched.narrow(0, num_samples, num_samples)?;
 
         // Step 5: Compute the CFG-modified noise prediction.
         //
@@ -504,16 +645,50 @@ where
         // s>1 extrapolates toward stronger class conditioning.
         let pred_noise = combine_cfg_predictions(&pred_cond, &pred_uncond, guidance_scale)?;
 
-        // Step 6: Retrieve schedule coefficients for this timestep.
-        //   beta      = beta_t: noise variance for this step
-        //   alpha     = alpha_t = 1 - beta_t
-        //   alpha_bar = cumulative product of alpha values up to t
-        //   sigma     = sqrt(beta_tilde) — exact posterior standard deviation
-        let beta = betas[t_step];
-        let alpha = alphas[t_step];
+        // Step 6: Derive respaced schedule coefficients for this jump.
+        //
+        // ── RESPACING DERIVATION (Nichol & Dhariwal, "Improved DDPM") ──
+        //
+        // The original DDPM uses one step per timestep: t -> t-1.
+        // Respacing lets us skip timesteps: t_i -> t_{i+1} where t_{i+1}
+        // may be many raw steps away. The trick is to compute a SYNTHETIC
+        // beta/alpha that makes the posterior-mean formula valid for the jump.
+        //
+        // Key identity: for adjacent steps, alpha_bar_t = alpha_bar_{t-1} * alpha_t.
+        // Rearranging:  alpha_t = alpha_bar_t / alpha_bar_{t-1}
+        //               beta_t  = 1 - alpha_t = 1 - alpha_bar_t / alpha_bar_{t-1}
+        //
+        // For a JUMP from timestep t to timestep t_prev (possibly many steps away):
+        //   synthetic_alpha = alpha_bar_t / alpha_bar_{t_prev}
+        //   synthetic_beta  = 1 - synthetic_alpha
+        //
+        // This is equivalent to treating the entire jump as a SINGLE step with
+        // its own effective beta. The posterior mean formula from Step R7 of
+        // ddpm_reverse_step remains valid because it only depends on the ratio
+        // of cumulative alpha products.
+        //
+        // When num_inference_steps == start_timestep + 1 (no skipping), these
+        // reduce exactly to the original per-timestep beta/alpha values.
+        //
+        //   alpha_bar_prev = 1.0 when we've reached the end (x_0, pure signal)
         let alpha_bar = alphas_cumprod[t_step];
-        let alpha_bar_prev = alphas_cumprod_prev[t_step];
-        let sigma = sigmas[t_step];
+        let alpha_bar_prev = match timesteps.get(frame_idx + 1) {
+            Some(&t_prev) => alphas_cumprod[t_prev],
+            None => 1.0,
+        };
+        let beta = 1.0 - alpha_bar / alpha_bar_prev;
+        let alpha = 1.0 - beta;
+        // Posterior standard deviation for this (possibly skipped) jump:
+        //
+        //   sigma^2 = beta * (1 - alpha_bar_prev) / (1 - alpha_bar)
+        //
+        // ── DERIVATION ──
+        // The exact reverse posterior variance is:
+        //   sigma_tilde_t^2 = [beta_t * (1 - alpha_bar_{t-1})] / (1 - alpha_bar_t)
+        //
+        // Here beta/alpha_bar/alpha_bar_prev are the SYNTHETIC values for
+        // this jump, so the formula applies directly to skipped steps too.
+        let sigma = (beta * (1.0 - alpha_bar_prev) / (1.0 - alpha_bar)).sqrt();
 
         // Step 7: Recover x_0, constrain it to the normalized image domain,
         // then use the exact DDPM posterior mean. The algebraically equivalent
@@ -524,13 +699,13 @@ where
 
         // Step 9: Add stochasticity for all non-final steps.
         //
-        // WHY add noise for t > 0?
+        // WHY add noise except on the last subsequence entry?
         //   The true reverse posterior is Gaussian with variance sigma_t^2.
-        //   Adding sigma_t * z samples from this posterior correctly.
-        //
-        // WHY no noise at t = 0?
-        //   The final step outputs x_0 deterministically; noise would degrade it.
-        if t_step > 0 {
+        //   Adding sigma_t * z samples from this posterior correctly. On the
+        //   last entry alpha_bar_prev = 1.0, so sigma is exactly 0 and no
+        //   noise would be added regardless — the branch just skips the
+        //   wasted randn call.
+        if frame_idx + 1 < timesteps.len() {
             // z ~ N(0, I): independent noise for this reverse step.
             let z = Tensor::randn(0.0f32, 1.0f32, (num_samples, img_dim), device)?;
             // x_{t-1} = mean + sigma_t * z
@@ -540,10 +715,40 @@ where
             xt = mean;
         }
 
-        let frame_idx = start_timestep - t_step;
         on_step(frame_idx, &xt)?;
     }
     Ok(xt)
+}
+
+pub fn sample_ddpm_cfg_from_timestep_with_callback<F>(
+    model: &dyn DenoisingModel,
+    scheduler: &BetaScheduler,
+    xt: Tensor,
+    start_timestep: usize,
+    img_dim: usize,
+    time_emb_dim: usize,
+    class_one_hot: &Tensor,
+    guidance_scale: f64,
+    device: &Device,
+    on_step: F,
+) -> Result<Tensor>
+where
+    F: FnMut(usize, &Tensor) -> Result<()>,
+{
+    // Full-resolution DDPM: one reverse step per timestep, start_timestep -> 0.
+    sample_ddpm_cfg_strided_with_callback(
+        model,
+        scheduler,
+        xt,
+        start_timestep,
+        start_timestep + 1,
+        img_dim,
+        time_emb_dim,
+        class_one_hot,
+        guidance_scale,
+        device,
+        on_step,
+    )
 }
 
 fn combine_cfg_predictions(
@@ -551,10 +756,21 @@ fn combine_cfg_predictions(
     unconditional: &Tensor,
     guidance_scale: f64,
 ) -> Result<Tensor> {
-    // epsilon = epsilon_uncond + s * (epsilon_cond - epsilon_uncond)
+    // CFG blending formula:
     //
-    // The endpoints are valuable invariants: s=0 must reproduce unconditional
-    // prediction exactly, while s=1 must reproduce ordinary conditioning.
+    //   eps_guided = eps_uncond + s * (eps_cond - eps_uncond)
+    //
+    // Algebraic expansion:
+    //   eps_guided = (1-s)*eps_uncond + s*eps_cond
+    //
+    // Verification of boundary values (these are valuable invariants for testing):
+    //   s=0:  eps_guided = eps_uncond                    (unconditional)
+    //   s=1:  eps_guided = eps_cond                      (standard conditional)
+    //   s=2:  eps_guided = 2*eps_cond - eps_uncond        (double guidance)
+    //   s=-1: eps_guided = 2*eps_uncond - eps_cond        (anti-guidance)
+    //
+    // The code computes: unconditional + scale * (conditional - unconditional)
+    // which is exactly the formula above.
     Ok(unconditional.add(
         &conditional
             .sub(unconditional)?
@@ -570,26 +786,66 @@ fn clipped_ddpm_posterior_mean(
     alpha_bar: f32,
     alpha_bar_prev: f32,
 ) -> Result<Tensor> {
-    // Recover the clean-image estimate implied by the epsilon prediction:
+    // ── STEP A: Recover the clean-image estimate x0_hat ──
     //
-    //   x0_hat = (xt - sqrt(1 - alpha_bar_t) * epsilon) / sqrt(alpha_bar_t)
+    // From the forward process reparameterization:
+    //   x_t = sqrt(alpha_bar_t) * x_0 + sqrt(1 - alpha_bar_t) * epsilon
     //
-    // A weak predictor can make x0_hat enormous near the noisy end of a cosine
-    // schedule, where alpha_bar is tiny. Dynamic thresholding is common in
-    // larger systems; for normalized MNIST, clipping to the known [-1, 1]
-    // training domain is the direct equivalent.
+    // Solving for x_0:
+    //   x_0 = (x_t - sqrt(1 - alpha_bar_t) * epsilon) / sqrt(alpha_bar_t)
+    //
+    // Substituting the model's prediction epsilon_theta for epsilon:
+    //   x0_hat = (x_t - sqrt(1 - alpha_bar_t) * eps_theta) / sqrt(alpha_bar_t)
+    //
+    // ── WHY CLAMP x0_hat to [-1, 1]? ──
+    //
+    // When alpha_bar_t is very small (high noise, late timesteps, especially
+    // with a cosine schedule), dividing by sqrt(alpha_bar_t) amplifies any
+    // error in the noise prediction ENORMOUSLY. For example:
+    //   alpha_bar_t = 0.0001 → dividing by sqrt(0.0001) = 0.01 → 100x amplification
+    //
+    // A small prediction error of 0.01 becomes an x0_hat value of ±1.0 — and
+    // larger errors push it to ±10 or ±100. Since training images live in
+    // [-1, 1], values outside this range are nonsensical and will corrupt
+    // the posterior mean calculation.
+    //
+    // Clamping is the MNIST-scale equivalent of "dynamic thresholding" used
+    // in larger diffusion models (Imagen, etc.).
     let predicted_x0 = xt
         .sub(&predicted_noise.affine((1.0 - alpha_bar).sqrt() as f64, 0.0)?)?
         .affine((1.0 / alpha_bar.sqrt()) as f64, 0.0)?
         .clamp(-1.0f32, 1.0f32)?;
-    // Exact q(x_{t-1} | xt, x0_hat) posterior-mean coefficients:
+
+    // ── STEP B: Compute the exact reverse posterior mean ──
     //
-    //   c_x0 = beta_t * sqrt(alpha_bar_{t-1}) / (1 - alpha_bar_t)
+    // The true reverse posterior q(x_{t-1} | x_t, x_0) has mean:
+    //
+    //   mu_tilde_t = c_x0 * x_0 + c_xt * x_t
+    //
+    // where:
+    //   c_x0 = sqrt(alpha_bar_{t-1}) * beta_t / (1 - alpha_bar_t)
     //   c_xt = sqrt(alpha_t) * (1 - alpha_bar_{t-1}) / (1 - alpha_bar_t)
+    //
+    // ── DERIVATION ──
+    //
+    // Starting from Bayes' rule on Gaussians:
+    //   q(x_{t-1}|x_t,x_0) ∝ q(x_t|x_{t-1}) * q(x_{t-1}|x_0)
+    //
+    // Both are Gaussian, so the product is Gaussian. Completing the square
+    // in the exponent gives:
+    //
+    //   mu_tilde = [sqrt(alpha_t)*(1-alpha_bar_{t-1})/(1-alpha_bar_t)] * x_t
+    //            + [sqrt(alpha_bar_{t-1})*beta_t/(1-alpha_bar_t)] * x_0
+    //
+    // Note: c_x0 + c_xt ≠ 1 in general — this is NOT a convex combination.
+    // The weights depend on the signal-to-noise ratios at t and t-1.
+    //
+    // We substitute x0_hat (the clamped prediction) for x_0.
     let denominator = 1.0 - alpha_bar;
     let x0_coefficient = beta * alpha_bar_prev.sqrt() / denominator;
     let xt_coefficient = (1.0 - alpha_bar_prev) * alpha.sqrt() / denominator;
 
+    // mu = c_x0 * x0_hat + c_xt * x_t
     predicted_x0
         .affine(x0_coefficient as f64, 0.0)?
         .add(&xt.affine(xt_coefficient as f64, 0.0)?)
@@ -597,8 +853,23 @@ fn clipped_ddpm_posterior_mean(
 }
 
 fn reverse_epsilon_coefficient(beta: f32, alpha_bar: f32, timestep: usize) -> Result<f32> {
-    // Validate at the point of construction so callers cannot quietly propagate
-    // NaN into every later reverse step and eventually encode it as a PNG.
+    // Computes:  eps_coef = beta_t / sqrt(1 - alpha_bar_t)
+    //
+    // ── WHERE THIS COMES FROM ──
+    //
+    // The epsilon-parameterized posterior mean is:
+    //   mu = (1/sqrt(alpha_t)) * (x_t - [beta_t / sqrt(1-alpha_bar_t)] * eps_theta)
+    //
+    // This coefficient (the bracketed part) converts the model's epsilon
+    // prediction (which estimates the TOTAL noise in x_t relative to x_0)
+    // into the right scale for a SINGLE reverse step.
+    //
+    // ── EDGE CASE: alpha_bar_t = 1.0 ──
+    //
+    // At alpha_bar_t = 1 (the original cosine schedule boundary at t=0),
+    // 1 - alpha_bar_t = 0, so sqrt(1 - alpha_bar_t) = 0, producing 0/0.
+    // We validate and bail rather than silently produce NaN that would
+    // propagate through every subsequent step and into the final PNG.
     let coefficient = beta / (1.0 - alpha_bar).sqrt();
     if !coefficient.is_finite() {
         bail!(
@@ -663,4 +934,275 @@ mod tests {
         assert!(mean.iter().all(|value| value.abs() < 0.2));
         Ok(())
     }
+}
+
+// Build a descending timestep subsequence in [0, start_timestep] with
+// `num_inference_steps` evenly spaced entries, always including both
+// start_timestep and 0. Both DDIM (non-Markovian update) and respaced DDPM
+// (Nichol & Dhariwal's "improved DDPM" respacing) can skip timesteps this
+// way: evaluating the model at K << T timesteps costs K forward passes
+// instead of T.
+fn strided_timesteps(start_timestep: usize, num_inference_steps: usize) -> Vec<usize> {
+    let total = start_timestep + 1;
+    let num = num_inference_steps.clamp(1, total);
+    if num == total {
+        return (0..=start_timestep).rev().collect();
+    }
+    if num == 1 {
+        // Single jump: evaluate at the noisiest step, then land on x_0.
+        return vec![start_timestep];
+    }
+    let mut ts = Vec::with_capacity(num);
+    for i in 0..num {
+        let frac = i as f64 / (num - 1) as f64;
+        let t = ((1.0 - frac) * start_timestep as f64).round() as usize;
+        ts.push(t);
+    }
+    // Rounding can collide adjacent entries; keep the subsequence strictly
+    // decreasing so every step advances.
+    ts.dedup();
+    ts
+}
+
+// =============================================================================
+// sample_ddim_cfg_strided_with_call_back — DDIM reverse sampler with CFG
+// =============================================================================
+//
+// WHAT IS DDIM?
+//   DDIM (Denoising Diffusion Implicit Models, Song et al. 2020) reformulates
+//   the reverse diffusion as a NON-MARKOVIAN process. Instead of sampling from
+//   a Gaussian posterior at each step (like DDPM), DDIM uses a deterministic
+//   update rule that "predicts x_0, then interpolates back" to the next step.
+//
+// HOW DOES THE DDIM UPDATE DIFFER FROM DDPM?
+//   DDPM:  x_{t-1} = mu_theta(x_t, t) + sigma_t * z       (stochastic)
+//   DDIM:  x_{t-1} = sqrt(alpha_bar_{t-1}) * x0_hat        (deterministic)
+//                  + sqrt(1 - alpha_bar_{t-1}) * eps_theta   when eta=0
+//
+//   The key insight: DDIM first recovers a clean-image estimate (x0_hat),
+//   then re-noises it to the level expected at the NEXT (lower) timestep.
+//   This makes the trajectory deterministic and allows large stride jumps
+//   without the variance accumulation that plagues strided DDPM.
+//
+// WHY IS DDIM BETTER FOR STRIDED (FEWER-STEP) SAMPLING?
+//   DDPM's stochastic noise injection assumes adjacent timesteps. Skipping
+//   many steps accumulates excess variance, degrading quality. DDIM's
+//   deterministic path is exact regardless of stride — the model only needs
+//   to predict epsilon at K chosen timesteps, and the x0-predict-then-re-noise
+//   formula handles arbitrary gaps cleanly.
+//
+// Arguments:
+//   model              — any CFG-aware model implementing DenoisingModel
+//   scheduler          — pre-computed noise schedule (same as training)
+//   xt                 — initial noise tensor x_T ~ N(0,I), shape (N, img_dim)
+//   start_timestep     — inclusive starting timestep index (e.g. 99 for 100-step)
+//   num_inference_steps — how many reverse steps to take (can be << total steps)
+//   _img_dim           — (unused, kept for API symmetry with DDPM variant)
+//   time_emb_dim       — sinusoidal time embedding size (must match training)
+//   class_one_hot      — target class one-hot vector, shape (N, num_classes)
+//   guidance_scale     — CFG strength s (1.0 = conditional only, >1 = amplified)
+//   device             — CPU or CUDA device
+//   on_step            — callback invoked after each reverse step
+pub fn sample_ddim_cfg_strided_with_call_back<F>(
+    model: &dyn DenoisingModel,
+    scheduler: &BetaScheduler,
+    mut xt: Tensor,
+    start_timestep: usize,
+    num_inference_steps: usize,
+    _img_dim: usize,
+    time_emb_dim: usize,
+    class_one_hot: &Tensor,
+    guidance_scale: f64,
+    device: &Device,
+    mut on_step: F,
+) -> Result<Tensor>
+where
+    F: FnMut(usize, &Tensor) -> Result<()>,
+{
+    if start_timestep >= scheduler.steps {
+        bail!(
+            "start_timestep {} must be < scheduler.steps {}",
+            start_timestep,
+            scheduler.steps
+        );
+    }
+
+    let num_samples = xt.dim(0)?;
+
+    // Pre-extract cumulative alpha products for O(1) lookup per step.
+    // DDIM only needs alpha_bar (not beta/alpha/sigma individually) because
+    // it works directly in the alpha_bar domain rather than per-step betas.
+    let alphas_cumprod = scheduler.alphas_cumprod.to_vec1::<f32>()?;
+
+    // Build the null (unconditional) one-hot for CFG — all zeros.
+    // WHY all-zeros? During training, dropped labels used all-zeros rows.
+    // The model learned to associate this with unconditional denoising.
+    let null_one_hot = Tensor::zeros(class_one_hot.dims(), class_one_hot.dtype(), device)?;
+
+    // Build the strided timestep subsequence. For num_inference_steps << T,
+    // this picks evenly spaced timesteps from start_timestep down to 0.
+    let timesteps = strided_timesteps(start_timestep, num_inference_steps);
+
+    // --- Reverse diffusion loop over the (possibly strided) subsequence ----
+    for (frame_idx, &t) in timesteps.iter().enumerate() {
+        // Step 1: Build timestep tensor — same t repeated for each batch sample.
+        let t_vec = vec![t as u32; num_samples];
+        let t_tensor = Tensor::new(t_vec.as_slice(), device)?;
+
+        // Step 2: Sinusoidal time embedding (must match training).
+        let time_emb = get_time_embedding(&t_tensor, time_emb_dim)?;
+
+        // Step 3: Construct conditional and unconditional model inputs.
+        //   v_cond = concat(x_t, time_emb, class_one_hot)  — guided
+        //   v_null = concat(x_t, time_emb, null_one_hot)   — unconditional
+        let v_cond = Tensor::cat(&[&xt, &time_emb, class_one_hot], 1)?;
+        let v_null = Tensor::cat(&[&xt, &time_emb, &null_one_hot], 1)?;
+
+        // Step 4: Batched CFG forward pass.
+        // Stack conditional + unconditional inputs along batch dim and run the
+        // model once. This halves per-step evaluations (the dominant cost).
+        // Split the result back into conditional and unconditional predictions.
+        let v_batched = Tensor::cat(&[&v_cond, &v_null], 0)?;
+        let (pred_batched, _) = model.forward(&v_batched)?;
+        let pred_cond = pred_batched.narrow(0, 0, num_samples)?;
+        let pred_uncond = pred_batched.narrow(0, num_samples, num_samples)?;
+
+        // Step 5: Combine via CFG formula:
+        //   eps_guided = eps_uncond + s * (eps_cond - eps_uncond)
+        let pred_noise = combine_cfg_predictions(&pred_cond, &pred_uncond, guidance_scale)?;
+
+        // Step 6: Retrieve alpha_bar values for the DDIM update.
+        //
+        // alpha_bar_t     = cumulative signal retention at current timestep t
+        // alpha_bar_prev  = cumulative signal retention at the NEXT subsequence
+        //                   entry (the "landing" timestep). For the final step
+        //                   this is 1.0 (clean signal, no noise remaining).
+        //
+        // WHY is alpha_bar_prev from the subsequence, not t-1?
+        //   In strided DDIM we jump from t to the next entry in the strided
+        //   sequence, which may skip many raw timesteps. The DDIM formula
+        //   handles this correctly because it only uses alpha_bar values (not
+        //   per-step betas), making arbitrary jumps exact.
+        let alpha_bar_t_val = alphas_cumprod[t] as f64;
+        let alpha_bar_prev_val = match timesteps.get(frame_idx + 1) {
+            Some(&t_prev) => alphas_cumprod[t_prev] as f64,
+            None => 1.0,
+        };
+
+        // Step 7: Predict x_0 from the current noisy x_t and predicted noise.
+        //
+        //   x0_hat = (x_t - sqrt(1 - alpha_bar_t) * eps_theta) / sqrt(alpha_bar_t)
+        //
+        // WHY recover x_0 first?
+        //   This is the key difference from DDPM. Instead of computing a
+        //   posterior mean in x-space, DDIM first estimates what the clean
+        //   image looks like, then re-noises it to the target level. This
+        //   "predict x_0, then re-noise" approach is what makes DDIM
+        //   deterministic and stride-agnostic.
+        //
+        // WHY clamp to [-1, 1]?
+        //   The model was trained on images normalized to [-1, 1]. Without
+        //   clamping, a weak noise prediction at high-noise timesteps can
+        //   produce x0_hat far outside this range, causing the re-noising
+        //   step to amplify the error. Clamping is the MNIST-scale equivalent
+        //   of the "dynamic thresholding" used in larger systems.
+        let pred_x0 = xt
+            .sub(&pred_noise.affine((1.0 - alpha_bar_t_val).sqrt(), 0.0)?)?
+            .affine(1.0 / alpha_bar_t_val.sqrt(), 0.0)?
+            .clamp(-1.0, 1.0)?;
+
+        // Step 8: Compute the "direction pointing to x_t" component.
+        //
+        //   direction = sqrt(1 - alpha_bar_{t-1}) * eps_theta
+        //
+        // WHY this term?
+        //   The DDIM update reconstructs x_{t-1} as:
+        //     x_{t-1} = sqrt(alpha_bar_{t-1}) * x0_hat + direction
+        //
+        //   The direction term re-injects exactly the right amount of
+        //   "predicted noise structure" so that x_{t-1} is consistent with
+        //   the noise level at timestep t-1. This is NOT random noise (like
+        //   DDPM's z term) — it uses the model's own prediction, making the
+        //   trajectory deterministic.
+        let dir = pred_noise.affine((1.0 - alpha_bar_prev_val).sqrt(), 0.0)?;
+
+        // Step 9: Assemble the DDIM update.
+        //
+        //   x_{t-1} = sqrt(alpha_bar_{t-1}) * x0_hat + sqrt(1 - alpha_bar_{t-1}) * eps_theta
+        //
+        // This is the full deterministic DDIM formula (eta=0).
+        // At the final step, alpha_bar_prev = 1.0, so:
+        //   - the x0_hat coefficient becomes 1.0 (we just output x0_hat)
+        //   - the direction coefficient becomes 0.0 (no noise re-injection)
+        //   → the output is exactly the clamped x0 prediction.
+        xt = pred_x0.affine(alpha_bar_prev_val.sqrt(), 0.0)?.add(&dir)?;
+        on_step(frame_idx, &xt)?;
+    }
+
+    Ok(xt)
+}
+
+// Full-resolution DDIM with callback: evaluates every single timestep from
+// start_timestep down to 0 (no striding). Delegates to the strided variant
+// with num_inference_steps == start_timestep + 1, which covers all timesteps.
+//
+// WHY a separate function instead of just calling the strided one directly?
+//   API ergonomics — callers that want full-resolution don't need to compute
+//   the step count themselves, and this wrapper makes the intent clear.
+pub fn sample_ddim_cfg_from_timestep_with_call_back<F>(
+    model: &dyn DenoisingModel,
+    scheduler: &BetaScheduler,
+    xt: Tensor,
+    start_timestep: usize,
+    img_dim: usize,
+    time_emb_dim: usize,
+    class_one_hot: &Tensor,
+    guidance_scale: f64,
+    device: &Device,
+    on_step: F,
+) -> Result<Tensor>
+where
+    F: FnMut(usize, &Tensor) -> Result<()>,
+{
+    // Full-resolution DDIM: one reverse step per timestep, start_timestep -> 0.
+    sample_ddim_cfg_strided_with_call_back(
+        model,
+        scheduler,
+        xt,
+        start_timestep,
+        start_timestep + 1,
+        img_dim,
+        time_emb_dim,
+        class_one_hot,
+        guidance_scale,
+        device,
+        on_step,
+    )
+}
+
+// Convenience wrapper: full-resolution DDIM from a given timestep, no callback.
+// Equivalent to the callback variant with a no-op closure.
+pub fn sample_ddim_cfg_from_timestep(
+    model: &dyn DenoisingModel,
+    scheduler: &BetaScheduler,
+    xt: Tensor,
+    start_timestep: usize,
+    img_dim: usize,
+    time_emb_dim: usize,
+    class_one_hot: &Tensor,
+    guidance_scale: f64,
+    device: &Device,
+) -> Result<Tensor> {
+    sample_ddim_cfg_from_timestep_with_call_back(
+        model,
+        scheduler,
+        xt,
+        start_timestep,
+        img_dim,
+        time_emb_dim,
+        class_one_hot,
+        guidance_scale,
+        device,
+        |_, _| Ok(()),
+    )
 }

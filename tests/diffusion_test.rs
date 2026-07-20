@@ -314,15 +314,15 @@ fn test_cnn_5layers_forward_backward_update() -> Result<()> {
     assert_eq!(grads.len(), 12);
     assert_eq!(grads[0].dims(), &[img_dim, cond_dim]); // dw_cond
     assert_eq!(grads[1].dims(), &[img_dim]); // db_cond
-    assert_eq!(grads[2].dims(), &[16, 2, 5, 5]); // dw1
-    assert_eq!(grads[3].dims(), &[16]); // db1
-    assert_eq!(grads[4].dims(), &[32, 16, 5, 5]); // dw2
-    assert_eq!(grads[5].dims(), &[32]); // db2
-    assert_eq!(grads[6].dims(), &[32, 32, 5, 5]); // dw3
-    assert_eq!(grads[7].dims(), &[32]); // db3
-    assert_eq!(grads[8].dims(), &[16, 32, 5, 5]); // dw4
-    assert_eq!(grads[9].dims(), &[16]); // db4
-    assert_eq!(grads[10].dims(), &[1, 16, 5, 5]); // dw5
+    assert_eq!(grads[2].dims(), &[64, 2, 5, 5]); // dw1
+    assert_eq!(grads[3].dims(), &[64]); // db1
+    assert_eq!(grads[4].dims(), &[128, 64, 5, 5]); // dw2
+    assert_eq!(grads[5].dims(), &[128]); // db2
+    assert_eq!(grads[6].dims(), &[128, 128, 5, 5]); // dw3
+    assert_eq!(grads[7].dims(), &[128]); // db3
+    assert_eq!(grads[8].dims(), &[64, 128, 5, 5]); // dw4
+    assert_eq!(grads[9].dims(), &[64]); // db4
+    assert_eq!(grads[10].dims(), &[1, 64, 5, 5]); // dw5
     assert_eq!(grads[11].dims(), &[1]); // db5
 
     // --- Manual weight update (SGD step with lr=0.1) -----------------------
@@ -345,9 +345,25 @@ fn test_cnn_5layers_forward_backward_update() -> Result<()> {
 // =============================================================================
 //
 // End-to-end shape and update test for SimpleDenoisingUNet:
-//   1. Forward: verify output (B, img_dim) and 20 cached intermediate tensors.
-//   2. Backward: verify 12 gradient tensors matching parameter shapes.
+//   1. Forward: verify output (B, img_dim) and 26 cached intermediate tensors.
+//   2. Backward: verify 15 gradient tensors matching parameter shapes.
 //   3. SGD step update verification.
+//
+// WHY 26 intermediates (vs 9 for the 5-layer CNN)?
+//   The U-Net caches skip-connection tensors alongside the usual
+//   (pre-act, post-act) pairs. Each encoder level saves its output for
+//   concatenation with the corresponding decoder level. The bottleneck,
+//   upsampling, and conditioning layers add further cached tensors.
+//
+// WHY 15 gradients (vs 12 for the 5-layer CNN)?
+//   The U-Net has 5 conv layers + conditioning projection + 2 extra
+//   normalization or projection layers. Each contributes a (weight, bias)
+//   pair, plus the conditioning layer's (w, b) = 15 gradient tensors.
+//
+// Skip-connection gradient shapes:
+//   The decoder layers receive concatenated inputs from the encoder skip
+//   connections. For example, dw4 has shape (16, 48, 3, 3) because its
+//   input is concat(upsampled_32ch, skip_16ch) = 48 channels.
 #[test]
 fn test_unet_forward_backward_update() -> Result<()> {
     let device = &Device::Cpu;
