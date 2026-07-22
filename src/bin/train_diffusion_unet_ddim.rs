@@ -25,6 +25,7 @@
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 
+use llm_scratch_rs::common::Ema;
 use llm_scratch_rs::models::diffusion::sampling::{
     sample_ddim_cfg_strided_with_call_back, sample_ddpm_cfg_from_timestep_with_callback,
     sample_ddpm_cfg_strided_with_callback,
@@ -33,7 +34,7 @@ use llm_scratch_rs::models::diffusion::sampling::{
 // Model components:
 use llm_scratch_rs::models::diffusion::{
     get_time_embedding, make_one_hot_cfg, one_hot_class, save_model_checkpoint, BetaScheduler,
-    DenoisingModel, MlpAdamOptimizer, SimpleDenoisingUNet,
+    DenoisingModel, MlpAdamOptimizer, Parameterized, SimpleDenoisingUNet,
 };
 
 // Shared MNIST dataset loader and PNG writer.
@@ -338,10 +339,10 @@ fn main() -> Result<()> {
     // --- Model & schedule setup ---
     let img_dim = 784; // 28×28 pixels, flattened
     let time_emb_dim = 16; // Sinusoidal time embedding dimension
-    // cond_dim = time_emb_dim (16) + num_classes (10) = 26
-    // The model receives concat(x_t, time_emb, class_one_hot) as input.
+                           // cond_dim = time_emb_dim (16) + num_classes (10) = 26
+                           // The model receives concat(x_t, time_emb, class_one_hot) as input.
     let cond_dim = time_emb_dim + 10;
-    let mut model = SimpleDenoisingUNet::new(img_dim, cond_dim, &device)?;
+    let model = SimpleDenoisingUNet::new(img_dim, cond_dim, &device)?;
 
     // WHY cosine schedule instead of linear?
     //   The cosine schedule (Nichol & Dhariwal, 2021) distributes noise more
@@ -351,7 +352,8 @@ fn main() -> Result<()> {
     let scheduler = BetaScheduler::new_cosine(100, &device)?;
 
     let mut optimizer = MlpAdamOptimizer::new(&model, 1e-4)?;
-
+    // Add EMA instance here (0.9999 decay rate):
+    let mut ema = Ema::new(&model, 0.9999)?;
     // Fixed class and noise for deterministic checkpoint comparisons.
     // Using the same noise across epochs lets us visually track how the
     // model's output evolves during training.
@@ -512,13 +514,30 @@ fn main() -> Result<()> {
         }
 
         // --- Step 7: Adam optimizer update. ---
-        optimizer.step(&mut model, &grads)?;
-
+        optimizer.step(&model, &grads)?;
+        // 2. Update EMA shadow weights with the new model weights
+        ema.update(&model)?;
         if epoch % 500 == 0 {
             println!(
                 "Saving fixed-noise checkpoint sample for epoch {}...",
                 epoch
             );
+            // Save online model weights
+            save_model_checkpoint(
+                &model,
+                format!("unet_checkpoints/epoch_{epoch:04}.safetensors"),
+            )?;
+            // --- NON-DESTRUCTIVE EMA EVALUATION ---
+            // A. Backup live training weights
+            ema.store(&model)?;
+
+            // B. Copy EMA shadow weights into the live model
+            ema.copy_to_model(&model)?;
+            // C. Save EMA checkpoint and generate preview image using EMA weights
+            save_model_checkpoint(
+                &model,
+                format!("unet_checkpoints/ema_epoch_{epoch:04}.safetensors"),
+            )?;
             save_fixed_noise_checkpoint(
                 &model,
                 &scheduler,
@@ -533,6 +552,8 @@ fn main() -> Result<()> {
                 time_emb_dim,
                 &device,
             )?;
+            // D. Restore live training weights so training continues cleanly
+            ema.restore(&model)?;
         }
     }
 

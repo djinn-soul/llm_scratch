@@ -35,7 +35,7 @@ use candle_core::{DType, Device, Tensor};
 //   SimpleDenoisingMlp  — two-layer fully-connected denoising network
 //   sample_ddpm_cond    — shared reverse diffusion sampler with class conditioning
 use llm_scratch_rs::models::diffusion::{
-    get_time_embedding, sample_ddpm_cond, BetaScheduler, DenoisingModel, MlpAdamOptimizer,
+    get_time_embedding, sample_ddpm_cond, BetaScheduler, DenoisingModel, MlpAdamOptimizer, Parameterized,
     SimpleDenoisingMlp,
 };
 
@@ -134,7 +134,7 @@ fn main() -> Result<()> {
     // WHY output_dim = 784?
     //   The model predicts the noise vector ε ~ N(0, I) that was added to x_0.
     //   ε has the same shape as the image, so output_dim = img_dim = 784.
-    let mut mlp = SimpleDenoisingMlp::new(
+    let mlp = SimpleDenoisingMlp::new(
         img_dim + time_emb_dim + class_dim, // 810
         hidden_dim,                         // 512
         img_dim,                            // 784
@@ -281,7 +281,7 @@ fn main() -> Result<()> {
         // Adam computes bias-corrected first and second moment estimates, then
         // applies per-parameter adaptive learning rates.  This is more robust
         // to noisy gradients than SGD with a fixed step size.
-        optimizer.step(&mut mlp, &grads)?;
+        optimizer.step(&mlp, &grads)?;
 
         let param_names = mlp.param_names();
 

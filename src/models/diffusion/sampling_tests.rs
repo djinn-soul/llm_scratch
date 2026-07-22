@@ -31,6 +31,8 @@ use super::sampling::{
     sample_ddpm_cfg_strided_with_callback,
 };
 use super::{BetaScheduler, DenoisingModel};
+use crate::common::parameterized::Parameterized;
+use candle_nn::VarMap;
 
 // A zero predictor: always predicts epsilon = 0 for every pixel.
 // WHY? This isolates sampler algebra from learned model behavior. If a
@@ -39,6 +41,19 @@ use super::{BetaScheduler, DenoisingModel};
 // can verify analytically (e.g. x0_hat = xt / sqrt(alpha_bar_t)).
 struct ZeroNoiseModel {
     image_size: usize,
+    // Empty: this model has no trainable weights. `Parameterized` still needs
+    // something to hand back, and an empty VarMap is the honest answer — it
+    // makes `params()`/`param_names()`/`varmap()` agree at zero parameters.
+    varmap: VarMap,
+}
+
+impl ZeroNoiseModel {
+    fn new(image_size: usize) -> Self {
+        Self {
+            image_size,
+            varmap: VarMap::new(),
+        }
+    }
 }
 
 // Verify that starting CFG sampling at an explicit timestep produces exactly
@@ -48,7 +63,7 @@ fn cfg_sampling_respects_requested_start_timestep() -> Result<()> {
     let device = &Device::Cpu;
     let image_size = 16;
     let scheduler = BetaScheduler::new_cosine(8, device)?;
-    let model = ZeroNoiseModel { image_size };
+    let model = ZeroNoiseModel::new(image_size);
     let initial_noise = Tensor::zeros((1, image_size), DType::F32, device)?;
     let class = Tensor::zeros((1, 2), DType::F32, device)?;
     let mut callback_count = 0;
@@ -95,11 +110,14 @@ impl DenoisingModel for ZeroNoiseModel {
         Ok(Vec::new())
     }
 
-    fn params(&self) -> Vec<&Tensor> {
-        Vec::new()
+}
+
+impl Parameterized for ZeroNoiseModel {
+    fn varmap(&self) -> &VarMap {
+        &self.varmap
     }
 
-    fn params_mut(&mut self) -> Vec<&mut Tensor> {
+    fn params(&self) -> Vec<&Tensor> {
         Vec::new()
     }
 
@@ -117,7 +135,7 @@ fn cosine_cfg_sampling_stays_finite_through_timestep_zero() -> Result<()> {
     let device = &Device::Cpu;
     let image_size = 16;
     let scheduler = BetaScheduler::new_cosine(8, device)?;
-    let model = ZeroNoiseModel { image_size };
+    let model = ZeroNoiseModel::new(image_size);
     let initial_noise = Tensor::zeros((1, image_size), DType::F32, device)?;
     let class = Tensor::zeros((1, 2), DType::F32, device)?;
 
@@ -151,7 +169,7 @@ fn ddim_cfg_sampling_respects_requested_start_timestep() -> Result<()> {
     let device = &Device::Cpu;
     let image_size = 16;
     let scheduler = BetaScheduler::new_cosine(8, device)?;
-    let model = ZeroNoiseModel { image_size };
+    let model = ZeroNoiseModel::new(image_size);
     let initial_noise = Tensor::zeros((1, image_size), DType::F32, device)?;
     let class = Tensor::zeros((1, 2), DType::F32, device)?;
     let mut callback_count = 0;
@@ -186,7 +204,7 @@ fn ddim_cfg_sampling_stays_finite_through_timestep_zero() -> Result<()> {
     let device = &Device::Cpu;
     let image_size = 16;
     let scheduler = BetaScheduler::new_cosine(8, device)?;
-    let model = ZeroNoiseModel { image_size };
+    let model = ZeroNoiseModel::new(image_size);
     let initial_noise = Tensor::ones((1, image_size), DType::F32, device)?;
     let class = Tensor::zeros((1, 2), DType::F32, device)?;
 
@@ -216,7 +234,7 @@ fn ddim_zero_noise_collapses_to_clamped_x0_at_final_step() -> Result<()> {
     let device = &Device::Cpu;
     let image_size = 4;
     let scheduler = BetaScheduler::new_cosine(8, device)?;
-    let model = ZeroNoiseModel { image_size };
+    let model = ZeroNoiseModel::new(image_size);
     let initial_noise = Tensor::zeros((1, image_size), DType::F32, device)?;
     let class = Tensor::zeros((1, 2), DType::F32, device)?;
 
@@ -248,7 +266,7 @@ fn ddim_strided_sampling_uses_requested_step_count() -> Result<()> {
     let device = &Device::Cpu;
     let image_size = 16;
     let scheduler = BetaScheduler::new_cosine(100, device)?;
-    let model = ZeroNoiseModel { image_size };
+    let model = ZeroNoiseModel::new(image_size);
     let initial_noise = Tensor::zeros((1, image_size), DType::F32, device)?;
     let class = Tensor::zeros((1, 2), DType::F32, device)?;
     let mut callback_count = 0;
@@ -283,7 +301,7 @@ fn ddim_strided_sampling_stays_finite() -> Result<()> {
     let device = &Device::Cpu;
     let image_size = 16;
     let scheduler = BetaScheduler::new_cosine(100, device)?;
-    let model = ZeroNoiseModel { image_size };
+    let model = ZeroNoiseModel::new(image_size);
     let initial_noise = Tensor::ones((1, image_size), DType::F32, device)?;
     let class = Tensor::zeros((1, 2), DType::F32, device)?;
 
@@ -315,7 +333,7 @@ fn ddim_full_resolution_wrapper_matches_full_strided_sequence() -> Result<()> {
     let device = &Device::Cpu;
     let image_size = 8;
     let scheduler = BetaScheduler::new_cosine(8, device)?;
-    let model = ZeroNoiseModel { image_size };
+    let model = ZeroNoiseModel::new(image_size);
     let class = Tensor::zeros((1, 2), DType::F32, device)?;
 
     let via_wrapper = sample_ddim_cfg_from_timestep_with_call_back(
@@ -364,7 +382,7 @@ fn ddpm_strided_sampling_uses_requested_step_count() -> Result<()> {
     let device = &Device::Cpu;
     let image_size = 16;
     let scheduler = BetaScheduler::new_cosine(100, device)?;
-    let model = ZeroNoiseModel { image_size };
+    let model = ZeroNoiseModel::new(image_size);
     let initial_noise = Tensor::zeros((1, image_size), DType::F32, device)?;
     let class = Tensor::zeros((1, 2), DType::F32, device)?;
     let mut callback_count = 0;
@@ -395,7 +413,7 @@ fn ddpm_strided_sampling_stays_finite() -> Result<()> {
     let device = &Device::Cpu;
     let image_size = 16;
     let scheduler = BetaScheduler::new_cosine(100, device)?;
-    let model = ZeroNoiseModel { image_size };
+    let model = ZeroNoiseModel::new(image_size);
     let initial_noise = Tensor::ones((1, image_size), DType::F32, device)?;
     let class = Tensor::zeros((1, 2), DType::F32, device)?;
 
@@ -427,7 +445,7 @@ fn ddpm_strided_single_step_zero_noise_collapses_to_zero() -> Result<()> {
     let device = &Device::Cpu;
     let image_size = 4;
     let scheduler = BetaScheduler::new_cosine(8, device)?;
-    let model = ZeroNoiseModel { image_size };
+    let model = ZeroNoiseModel::new(image_size);
     let initial_noise = Tensor::zeros((1, image_size), DType::F32, device)?;
     let class = Tensor::zeros((1, 2), DType::F32, device)?;
     let mut callback_count = 0;

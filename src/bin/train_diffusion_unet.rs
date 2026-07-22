@@ -12,7 +12,7 @@ use llm_scratch_rs::models::diffusion::sampling::{
 // Model components:
 use llm_scratch_rs::models::diffusion::{
     get_time_embedding, make_one_hot_cfg, one_hot_class, save_model_checkpoint, BetaScheduler,
-    DenoisingModel, MlpAdamOptimizer, SimpleDenoisingUNet,
+    DenoisingModel, MlpAdamOptimizer, Parameterized, SimpleDenoisingUNet,
 };
 
 // Shared MNIST dataset loader and PNG writer.
@@ -214,7 +214,7 @@ fn main() -> Result<()> {
     let img_dim = 784;
     let time_emb_dim = 16;
     let cond_dim = time_emb_dim + 10;
-    let mut model = SimpleDenoisingUNet::new(img_dim, cond_dim, &device)?;
+    let model = SimpleDenoisingUNet::new(img_dim, cond_dim, &device)?;
     // let scheduler = BetaScheduler::new(100, 1e-4, 0.02, &device)?;
     let scheduler = BetaScheduler::new_cosine(100, &device)?;
 
@@ -276,7 +276,7 @@ fn main() -> Result<()> {
             );
         }
 
-        optimizer.step(&mut model, &grads)?;
+        optimizer.step(&model, &grads)?;
 
         if epoch % 500 == 0 {
             println!(

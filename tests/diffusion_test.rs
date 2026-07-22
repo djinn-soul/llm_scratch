@@ -27,9 +27,20 @@
 use anyhow::Result;
 use candle_core::{Device, Tensor};
 use llm_scratch_rs::models::diffusion::{
-    get_time_embedding, BetaScheduler, DenoisingModel, SimpleDenoisingCNN,
+    get_time_embedding, BetaScheduler, DenoisingModel, Parameterized, SimpleDenoisingCNN,
     SimpleDenoisingCNN5Layers, SimpleDenoisingMlp, SimpleDenoisingUNet,
 };
+
+// NOTE ON WEIGHT SNAPSHOTS IN THESE TESTS
+//
+// Parameters are written in place through `set_param()`, so `Tensor::clone()`
+// is NOT a snapshot — it shares storage and moves with the weight, making a
+// before/after comparison read as "nothing changed". Use `.copy()`.
+//
+// For the same reason these tests apply their update via `set_param()` rather
+// than assigning the field (`model.w1 = ...`). A direct assignment would swap
+// in a tensor with fresh storage, detaching that field from its VarMap entry:
+// the model would then train a tensor the checkpoint never sees.
 
 // =============================================================================
 // test_beta_scheduler
@@ -143,7 +154,7 @@ fn test_mlp_forward_backward_update() -> Result<()> {
     assert_eq!(intermediates[1].dims(), &[batch_size, hidden_dim]); // z1
 
     // Save a copy of w1 before the update.
-    let initial_w1 = mlp.w1.clone();
+    let initial_w1 = mlp.w1.copy()?;
 
     // --- Backward pass ------------------------------------------------------
     // Returns 4 gradient tensors: [dw1, db1, dw2, db2].
@@ -209,7 +220,7 @@ fn test_cnn_forward_backward_update() -> Result<()> {
     let cond_dim = 6;
     let in_dim = img_dim + cond_dim;
 
-    let mut cnn = SimpleDenoisingCNN::new(img_dim, cond_dim, device)?;
+    let cnn = SimpleDenoisingCNN::new(img_dim, cond_dim, device)?;
 
     let v = Tensor::randn(0.0f32, 1.0f32, (batch_size, in_dim), device)?;
     let target = Tensor::randn(0.0f32, 1.0f32, (batch_size, img_dim), device)?;
@@ -220,7 +231,7 @@ fn test_cnn_forward_backward_update() -> Result<()> {
     assert_eq!(pred.dims(), &[batch_size, img_dim]);
     assert_eq!(intermediates.len(), 3);
 
-    let initial_w1 = cnn.w1.clone();
+    let initial_w1 = cnn.w1.copy()?;
 
     // --- Backward pass ------------------------------------------------------
     let grads = DenoisingModel::backward(&cnn, &v, &intermediates, &pred, &target)?;
@@ -233,7 +244,7 @@ fn test_cnn_forward_backward_update() -> Result<()> {
     assert_eq!(grads[5].dims(), &[1]); // db2
 
     // --- Manual weight update (SGD step with lr=0.1) -----------------------
-    cnn.w1 = cnn.w1.sub(&grads[2].affine(0.1, 0.0)?)?;
+    cnn.set_param("w1", &cnn.w1.sub(&grads[2].affine(0.1, 0.0)?)?)?;
 
     // Verify w1 changed.
     let diff = cnn
@@ -295,7 +306,7 @@ fn test_cnn_5layers_forward_backward_update() -> Result<()> {
     let cond_dim = 6;
     let in_dim = img_dim + cond_dim;
 
-    let mut cnn = SimpleDenoisingCNN5Layers::new(img_dim, cond_dim, device)?;
+    let cnn = SimpleDenoisingCNN5Layers::new(img_dim, cond_dim, device)?;
 
     let v = Tensor::randn(0.0f32, 1.0f32, (batch_size, in_dim), device)?;
     let target = Tensor::randn(0.0f32, 1.0f32, (batch_size, img_dim), device)?;
@@ -306,7 +317,7 @@ fn test_cnn_5layers_forward_backward_update() -> Result<()> {
     assert_eq!(pred.dims(), &[batch_size, img_dim]);
     assert_eq!(intermediates.len(), 9);
 
-    let initial_w1 = cnn.w1.clone();
+    let initial_w1 = cnn.w1.copy()?;
 
     // --- Backward pass ------------------------------------------------------
     // 12 gradient tensors: one weight + one bias per parameter group.
@@ -326,7 +337,7 @@ fn test_cnn_5layers_forward_backward_update() -> Result<()> {
     assert_eq!(grads[11].dims(), &[1]); // db5
 
     // --- Manual weight update (SGD step with lr=0.1) -----------------------
-    cnn.w1 = cnn.w1.sub(&grads[2].affine(0.1, 0.0)?)?;
+    cnn.set_param("w1", &cnn.w1.sub(&grads[2].affine(0.1, 0.0)?)?)?;
 
     // Verify w1 changed — confirms backward produced a non-zero gradient.
     let diff = cnn
@@ -372,7 +383,7 @@ fn test_unet_forward_backward_update() -> Result<()> {
     let cond_dim = 6;
     let in_dim = img_dim + cond_dim;
 
-    let mut unet = SimpleDenoisingUNet::new(img_dim, cond_dim, device)?;
+    let unet = SimpleDenoisingUNet::new(img_dim, cond_dim, device)?;
 
     let v = Tensor::randn(0.0f32, 1.0f32, (batch_size, in_dim), device)?;
     let target = Tensor::randn(0.0f32, 1.0f32, (batch_size, img_dim), device)?;
@@ -382,7 +393,7 @@ fn test_unet_forward_backward_update() -> Result<()> {
     assert_eq!(pred.dims(), &[batch_size, img_dim]);
     assert_eq!(intermediates.len(), 26);
 
-    let initial_w1 = unet.w1.clone();
+    let initial_w1 = unet.w1.copy()?;
 
     // --- Backward pass ---
     let grads = DenoisingModel::backward(&unet, &v, &intermediates, &pred, &target)?;
@@ -401,7 +412,7 @@ fn test_unet_forward_backward_update() -> Result<()> {
     assert_eq!(grads[11].dims(), &[1]); // db5
 
     // --- Update step ---
-    unet.w1 = unet.w1.sub(&grads[2].affine(0.1, 0.0)?)?;
+    unet.set_param("w1", &unet.w1.sub(&grads[2].affine(0.1, 0.0)?)?)?;
 
     // Verify w1 changed
     let diff = unet

@@ -31,7 +31,7 @@ use candle_core::{DType, Device, Tensor};
 //   `SimpleDenoisingMlp`    — two-layer MLP: input → hidden → output
 //   `sample_ddpm_from_noise`— shared reverse diffusion sampler (unconditional)
 use llm_scratch_rs::models::diffusion::{
-    get_time_embedding, sample_ddpm_from_noise, BetaScheduler, DenoisingModel, MlpAdamOptimizer,
+    get_time_embedding, sample_ddpm_from_noise, BetaScheduler, DenoisingModel, MlpAdamOptimizer, Parameterized,
     SimpleDenoisingMlp,
 };
 
@@ -137,7 +137,7 @@ fn main() -> Result<()> {
     // WHY 784 as output?
     //   The model predicts the noise vector ε that was added to x_0.
     //   ε has the same shape as the image, so the output dimension = img_dim.
-    let mut mlp = SimpleDenoisingMlp::new(img_dim + time_emb_dim, hidden_dim, img_dim, &device)?;
+    let mlp = SimpleDenoisingMlp::new(img_dim + time_emb_dim, hidden_dim, img_dim, &device)?;
 
     // --- Build the Adam optimizer --------------------------------------------
     // Adam maintains per-parameter first and second moment estimates (m, v).
@@ -293,7 +293,7 @@ fn main() -> Result<()> {
         //
         // This adapts the step size for each parameter individually and handles
         // sparse or noisy gradients better than plain gradient descent.
-        optimizer.step(&mut mlp, &grads)?;
+        optimizer.step(&mlp, &grads)?;
 
         let param_names = mlp.param_names();
 

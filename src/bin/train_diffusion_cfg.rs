@@ -47,7 +47,7 @@ use llm_scratch_rs::models::diffusion::sampling::sample_ddpm_cfg;
 
 // Standard diffusion model components.
 use llm_scratch_rs::models::diffusion::{
-    get_time_embedding, BetaScheduler, DenoisingModel, MlpAdamOptimizer, SimpleDenoisingCNN,
+    get_time_embedding, BetaScheduler, DenoisingModel, MlpAdamOptimizer, Parameterized, SimpleDenoisingCNN,
 };
 
 // Shared MNIST download + parse helpers and PNG writer.
@@ -251,7 +251,7 @@ pub fn main() -> Result<()> {
     //   The model implicitly learns two behaviours from the same weights:
     //     - When the label slot has a 1: conditional denoising
     //     - When the label slot is all-zeros: unconditional denoising
-    let mut mlp = SimpleDenoisingCNN::new(
+    let mlp = SimpleDenoisingCNN::new(
         img_dim,                  // 784
         time_emb_dim + class_dim, // 16 + 10 = 26
         &device,
@@ -360,7 +360,7 @@ pub fn main() -> Result<()> {
         // ---------------------------------------------------------------------
         // Step 8 — Adam optimizer step: theta <- theta - lr * Adam(grad)
         // ---------------------------------------------------------------------
-        optimizer.step(&mut mlp, &grads)?;
+        optimizer.step(&mlp, &grads)?;
 
         let param_names = mlp.param_names();
 

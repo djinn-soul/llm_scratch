@@ -47,7 +47,7 @@ use llm_scratch_rs::models::diffusion::sampling::sample_ddpm_cfg;
 
 // 5-layer CNN model components.
 use llm_scratch_rs::models::diffusion::{
-    get_time_embedding, BetaScheduler, DenoisingModel, MlpAdamOptimizer, SimpleDenoisingCNN5Layers,
+    get_time_embedding, BetaScheduler, DenoisingModel, MlpAdamOptimizer, Parameterized, SimpleDenoisingCNN5Layers,
 };
 
 // Shared MNIST I/O utilities.
@@ -213,7 +213,7 @@ pub fn main() -> Result<()> {
     //         ≈ 3K + 205K + 410K + 205K + 2K ≈ 825K
     //   biases: negligible
     //   Total: ~845K parameters
-    let mut cnn = SimpleDenoisingCNN5Layers::new(img_dim, cond_dim, &device)?;
+    let cnn = SimpleDenoisingCNN5Layers::new(img_dim, cond_dim, &device)?;
 
     // --- Adam optimizer -------------------------------------------------------
     // Generic optimizer: works with any DenoisingModel via params()/params_mut().
@@ -277,7 +277,7 @@ pub fn main() -> Result<()> {
         let grads = DenoisingModel::backward(&cnn, &v, &intermediates, &pred, &noise)?;
 
         // --- Step 7: Adam optimizer step -------------------------------------
-        optimizer.step(&mut cnn, &grads)?;
+        optimizer.step(&cnn, &grads)?;
 
         // --- Step 8: Periodic logging ----------------------------------------
         // Log every 100 steps and at step 1 (to confirm training started).

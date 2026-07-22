@@ -1,5 +1,8 @@
 use anyhow::Result;
 use candle_core::{Device, Tensor};
+use candle_nn::VarMap;
+
+use crate::common::varstore;
 
 pub struct SpatialSelfAttention {
     pub w_q: Tensor,
@@ -8,11 +11,32 @@ pub struct SpatialSelfAttention {
 }
 
 impl SpatialSelfAttention {
-    pub fn new(channels: usize, device: &Device) -> Result<Self> {
+    /// Build the attention block, registering its weights into `varmap`.
+    ///
+    /// This is a sub-module: it does not own a VarMap of its own, it registers
+    /// into its parent's under `{prefix}w_q`, `{prefix}w_k`, `{prefix}w_v`. The
+    /// prefix is what keeps names unique if a model ever holds more than one
+    /// attention block, and it mirrors the usual `attn.w_q` checkpoint layout.
+    ///
+    /// The parent therefore stays the single owner of the parameter list, so
+    /// its `params()` / `param_names()` ordering still covers these weights.
+    pub fn new(channels: usize, varmap: &VarMap, prefix: &str, device: &Device) -> Result<Self> {
         let scale = (1.0f64 / channels as f64).sqrt();
-        let w_q = (Tensor::randn(0.0f32, 1.0f32, (channels, channels), device)? * scale)?;
-        let w_k = (Tensor::randn(0.0f32, 1.0f32, (channels, channels), device)? * scale)?;
-        let w_v = (Tensor::randn(0.0f32, 1.0f32, (channels, channels), device)? * scale)?;
+        let w_q = varstore::register(
+            varmap,
+            &format!("{prefix}w_q"),
+            (Tensor::randn(0.0f32, 1.0f32, (channels, channels), device)? * scale)?,
+        )?;
+        let w_k = varstore::register(
+            varmap,
+            &format!("{prefix}w_k"),
+            (Tensor::randn(0.0f32, 1.0f32, (channels, channels), device)? * scale)?,
+        )?;
+        let w_v = varstore::register(
+            varmap,
+            &format!("{prefix}w_v"),
+            (Tensor::randn(0.0f32, 1.0f32, (channels, channels), device)? * scale)?,
+        )?;
         Ok(Self { w_q, w_k, w_v })
     }
 
@@ -122,7 +146,8 @@ mod tests {
         let device = &Device::Cpu;
         let input = Tensor::new(&[[[[0.2f32, -0.4]], [[0.7, 0.1]]]], device)?;
         let delta = Tensor::new(&[[[[0.3f32, -0.2]], [[-0.5, 0.4]]]], device)?;
-        let attention = SpatialSelfAttention::new(2, device)?;
+        let varmap = VarMap::new();
+        let attention = SpatialSelfAttention::new(2, &varmap, "attn_", device)?;
         let (_, cached) = attention.forward(&input)?;
         let (_, analytic_wq, _, _) = attention.backward(&cached, &delta)?;
         let analytic = analytic_wq.flatten_all()?.to_vec1::<f32>()?[0];

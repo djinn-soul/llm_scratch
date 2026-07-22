@@ -57,7 +57,7 @@ use llm_scratch_rs::models::diffusion::sampling::sample_ddpm_cfg;
 //   MlpAdamOptimizer    — generic Adam optimizer (works with any DenoisingModel)
 //   SimpleDenoisingCNN  — 2-layer CNN denoiser
 use llm_scratch_rs::models::diffusion::{
-    get_time_embedding, BetaScheduler, DenoisingModel, MlpAdamOptimizer, SimpleDenoisingCNN,
+    get_time_embedding, BetaScheduler, DenoisingModel, MlpAdamOptimizer, Parameterized, SimpleDenoisingCNN,
 };
 
 // Shared MNIST dataset loader and PNG writer.
@@ -296,7 +296,7 @@ pub fn main() -> Result<()> {
     //   Channel 1: the conditioning map (projected from time+class), shape (B, 1, 28, 28).
     //   Concatenating them gives the CNN access to both content (noisy image)
     //   and context (what class, what noise level) in each spatial location.
-    let mut cnn = SimpleDenoisingCNN::new(img_dim, cond_dim, &device)?;
+    let cnn = SimpleDenoisingCNN::new(img_dim, cond_dim, &device)?;
 
     // --- Adam optimizer ------------------------------------------------------
     // `MlpAdamOptimizer::new` accepts any `DenoisingModel` and initialises
@@ -429,7 +429,7 @@ pub fn main() -> Result<()> {
         // Adam applies per-parameter adaptive learning rates using first and
         // second gradient moment estimates.  The generic optimizer zips `grads`
         // with `params_mut()` to update each parameter tensor in place.
-        optimizer.step(&mut cnn, &grads)?;
+        optimizer.step(&cnn, &grads)?;
 
         // ---------------------------------------------------------------------
         // Step 8 — Periodic logging: loss + gradient norms

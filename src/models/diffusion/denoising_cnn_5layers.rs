@@ -58,14 +58,17 @@ use candle_core::{DType, Device, Tensor};
 
 use super::denoising_cnn_ops::{manual_conv2d, manual_conv2d_backward};
 use super::DenoisingModel;
+use crate::common::parameterized::Parameterized;
+use crate::common::varstore;
+use candle_nn::VarMap;
 
 // =============================================================================
 // SimpleDenoisingCNN5Layers — struct definition
 // =============================================================================
 //
-// All parameters are public so the Adam optimizer can update them via
-// `params_mut()`.  Fields are ordered to match `params()` / `param_names()` /
-// the gradient vector returned by `backward()`.
+// All parameters are public so training code can read them directly.  Writes go
+// through `set_param()` by name.  Fields are ordered to match `params()` /
+// `param_names()` / the gradient vector returned by `backward()`.
 //
 // Tensor shape annotations use [C_out, C_in, kH, kW] for conv kernels:
 //
@@ -82,6 +85,10 @@ use super::DenoisingModel;
 //   w5:     (1,    64,  5, 5)          — Conv5: 64→1 channel (noise prediction)
 //   b5:     (1,)
 pub struct SimpleDenoisingCNN5Layers {
+    /// Owns every trainable parameter under its checkpoint name; the tensor
+    /// fields below share storage with its `Var`s.
+    varmap: VarMap,
+
     pub img_dim: usize,  // flattened image size (784 for MNIST)
     pub cond_dim: usize, // conditioning vector size (time_emb_dim + class_dim = 26)
     pub w_cond: Tensor,  // [img_dim, cond_dim]
@@ -112,48 +119,82 @@ impl SimpleDenoisingCNN5Layers {
     // wider channel widths (64/128) specified below, which were found to give
     // better convergence on MNIST with 5×5 kernels.
     pub fn new(img_dim: usize, cond_dim: usize, device: &Device) -> Result<Self> {
+        // Every parameter is registered in the VarMap; keep the tensor that
+        // `register` returns, not the one passed in — only the former shares
+        // storage with the stored `Var` and observes later updates.
+        let varmap = VarMap::new();
+
         // --- Conditioning projection ------------------------------------------
         // fan_in = cond_dim (26 input features per output neuron).
         let scale_cond = (2.0f64 / cond_dim as f64).sqrt();
-        let w_cond = (Tensor::randn(0.0f32, 1.0f32, (img_dim, cond_dim), device)? * scale_cond)?;
-        let b_cond = Tensor::zeros(img_dim, DType::F32, device)?;
+        let w_cond = varstore::register(
+            &varmap,
+            "w_cond",
+            (Tensor::randn(0.0f32, 1.0f32, (img_dim, cond_dim), device)? * scale_cond)?,
+        )?;
+        let b_cond = varstore::register(
+            &varmap,
+            "b_cond",
+            Tensor::zeros(img_dim, DType::F32, device)?,
+        )?;
 
         // --- Conv1 weights (2 in-channels → 64 out-channels, 5×5 kernel) ----
         // fan_in = C_in * kH * kW = 2 * 5 * 5 = 50
         // scale1 = sqrt(2 / 50) ≈ 0.2000
         let scale1 = (2.0f64 / (2.0 * 5.0 * 5.0)).sqrt();
-        let w1 = (Tensor::randn(0.0f32, 1.0f32, (64, 2, 5, 5), device)? * scale1)?;
-        let b1 = Tensor::zeros(64, DType::F32, device)?;
+        let w1 = varstore::register(
+            &varmap,
+            "w1",
+            (Tensor::randn(0.0f32, 1.0f32, (64, 2, 5, 5), device)? * scale1)?,
+        )?;
+        let b1 = varstore::register(&varmap, "b1", Tensor::zeros(64, DType::F32, device)?)?;
 
         // --- Conv2 weights (64 → 128 channels, 5×5 kernel) ------------------
         // fan_in = 64 * 5 * 5 = 1600
         // scale2 = sqrt(2 / 1600) ≈ 0.03536
         let scale2 = (2.0f64 / (64.0 * 5.0 * 5.0)).sqrt();
-        let w2 = (Tensor::randn(0.0f32, 1.0f32, (128, 64, 5, 5), device)? * scale2)?;
-        let b2 = Tensor::zeros(128, DType::F32, device)?;
+        let w2 = varstore::register(
+            &varmap,
+            "w2",
+            (Tensor::randn(0.0f32, 1.0f32, (128, 64, 5, 5), device)? * scale2)?,
+        )?;
+        let b2 = varstore::register(&varmap, "b2", Tensor::zeros(128, DType::F32, device)?)?;
 
         // --- Conv3 weights (128 → 128 channels, 5×5 kernel) -----------------
         // fan_in = 128 * 5 * 5 = 3200
         // scale3 = sqrt(2 / 3200) ≈ 0.02500
         let scale3 = (2.0f64 / (128.0 * 5.0 * 5.0)).sqrt();
-        let w3 = (Tensor::randn(0.0f32, 1.0f32, (128, 128, 5, 5), device)? * scale3)?;
-        let b3 = Tensor::zeros(128, DType::F32, device)?;
+        let w3 = varstore::register(
+            &varmap,
+            "w3",
+            (Tensor::randn(0.0f32, 1.0f32, (128, 128, 5, 5), device)? * scale3)?,
+        )?;
+        let b3 = varstore::register(&varmap, "b3", Tensor::zeros(128, DType::F32, device)?)?;
 
         // --- Conv4 weights (128 → 64 channels, 5×5 kernel) ------------------
         // fan_in = 128 * 5 * 5 = 3200  (same as Conv3; contracting path)
         // scale4 = sqrt(2 / 3200) ≈ 0.02500
         let scale4 = (2.0f64 / (128.0 * 5.0 * 5.0)).sqrt();
-        let w4 = (Tensor::randn(0.0f32, 1.0f32, (64, 128, 5, 5), device)? * scale4)?;
-        let b4 = Tensor::zeros(64, DType::F32, device)?;
+        let w4 = varstore::register(
+            &varmap,
+            "w4",
+            (Tensor::randn(0.0f32, 1.0f32, (64, 128, 5, 5), device)? * scale4)?,
+        )?;
+        let b4 = varstore::register(&varmap, "b4", Tensor::zeros(64, DType::F32, device)?)?;
 
         // --- Conv5 weights (64 → 1 channel, 5×5 kernel) ---------------------
         // fan_in = 64 * 5 * 5 = 1600
         // scale5 = sqrt(2 / 1600) ≈ 0.03536
         let scale5 = (2.0f64 / (64.0 * 5.0 * 5.0)).sqrt();
-        let w5 = (Tensor::randn(0.0f32, 1.0f32, (1, 64, 5, 5), device)? * scale5)?;
-        let b5 = Tensor::zeros(1, DType::F32, device)?;
+        let w5 = varstore::register(
+            &varmap,
+            "w5",
+            (Tensor::randn(0.0f32, 1.0f32, (1, 64, 5, 5), device)? * scale5)?,
+        )?;
+        let b5 = varstore::register(&varmap, "b5", Tensor::zeros(1, DType::F32, device)?)?;
 
         Ok(Self {
+            varmap,
             img_dim,
             cond_dim,
             w_cond,
@@ -388,6 +429,16 @@ impl DenoisingModel for SimpleDenoisingCNN5Layers {
         ])
     }
 
+}
+
+// =============================================================================
+// Parameterized implementation — weight access for optimizers/EMA/checkpoints
+// =============================================================================
+impl Parameterized for SimpleDenoisingCNN5Layers {
+    fn varmap(&self) -> &VarMap {
+        &self.varmap
+    }
+
     // =========================================================================
     // params — immutable parameter references (Adam initialisation)
     // =========================================================================
@@ -417,28 +468,6 @@ impl DenoisingModel for SimpleDenoisingCNN5Layers {
     fn param_names(&self) -> Vec<&str> {
         vec![
             "w_cond", "b_cond", "w1", "b1", "w2", "b2", "w3", "b3", "w4", "b4", "w5", "b5",
-        ]
-    }
-
-    // =========================================================================
-    // params_mut — mutable parameter references (Adam weight update)
-    // =========================================================================
-    // The Adam optimizer zips these with the gradient vector to apply
-    // per-parameter updates in place.  Order must match params() / backward().
-    fn params_mut(&mut self) -> Vec<&mut Tensor> {
-        vec![
-            &mut self.w_cond,
-            &mut self.b_cond,
-            &mut self.w1,
-            &mut self.b1,
-            &mut self.w2,
-            &mut self.b2,
-            &mut self.w3,
-            &mut self.b3,
-            &mut self.w4,
-            &mut self.b4,
-            &mut self.w5,
-            &mut self.b5,
         ]
     }
 }

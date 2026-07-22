@@ -17,11 +17,18 @@
 
 use anyhow::{bail, Result};
 use candle_core::{DType, Device, Tensor};
+use candle_nn::VarMap;
 
 use super::denoising_cnn_ops::{manual_conv2d, manual_conv2d_backward};
 use super::DenoisingModel;
+use crate::common::parameterized::Parameterized;
+use crate::common::varstore;
 
 pub struct SimpleDenoisingCNN {
+    /// Owns every trainable parameter under its checkpoint name; the tensor
+    /// fields below share storage with its `Var`s.
+    varmap: VarMap,
+
     pub img_dim: usize,  // flattened image size (784 for MNIST)
     pub cond_dim: usize, // conditioning vector size (time_emb_dim + class_dim)
     pub w_cond: Tensor,  // [img_dim, cond_dim]
@@ -34,26 +41,48 @@ pub struct SimpleDenoisingCNN {
 
 impl SimpleDenoisingCNN {
     pub fn new(img_dim: usize, cond_dim: usize, device: &Device) -> Result<Self> {
+        // Every parameter is registered in the VarMap; keep the tensor that
+        // `register` returns, not the one passed in — only the former shares
+        // storage with the stored `Var` and observes later updates.
+        let varmap = VarMap::new();
+
         // --- Conditioning projection weights ---------------------------------
         let scale_cond = (2.0f64 / cond_dim as f64).sqrt();
-        let w_cond = (Tensor::randn(0.0f32, 1.0f32, (img_dim, cond_dim), device)? * scale_cond)?;
-        let b_cond = Tensor::zeros(img_dim, DType::F32, device)?;
+        let w_cond = varstore::register(
+            &varmap,
+            "w_cond",
+            (Tensor::randn(0.0f32, 1.0f32, (img_dim, cond_dim), device)? * scale_cond)?,
+        )?;
+        let b_cond = varstore::register(
+            &varmap,
+            "b_cond",
+            Tensor::zeros(img_dim, DType::F32, device)?,
+        )?;
 
         // --- Conv1 weights ---------------------------------------------------
         // fan_in = C_in * kH * kW = 2 * 3 * 3 = 18
         // scale1 = sqrt(2 / 18) = 0.33333
         let scale1 = (2.0f64 / (2.0 * 3.0 * 3.0)).sqrt();
-        let w1 = (Tensor::randn(0.0f32, 1.0f32, (16, 2, 3, 3), device)? * scale1)?;
-        let b1 = Tensor::zeros(16, DType::F32, device)?;
+        let w1 = varstore::register(
+            &varmap,
+            "w1",
+            (Tensor::randn(0.0f32, 1.0f32, (16, 2, 3, 3), device)? * scale1)?,
+        )?;
+        let b1 = varstore::register(&varmap, "b1", Tensor::zeros(16, DType::F32, device)?)?;
 
         // --- Conv2 weights ---------------------------------------------------
         // fan_in = C_in * kH * kW = 16 * 3 * 3 = 144
         // scale2 = sqrt(2 / 144) ≈ 0.11785
         let scale2 = (2.0f64 / (16.0 * 3.0 * 3.0)).sqrt();
-        let w2 = (Tensor::randn(0.0f32, 1.0f32, (1, 16, 3, 3), device)? * scale2)?;
-        let b2 = Tensor::zeros(1, DType::F32, device)?;
+        let w2 = varstore::register(
+            &varmap,
+            "w2",
+            (Tensor::randn(0.0f32, 1.0f32, (1, 16, 3, 3), device)? * scale2)?,
+        )?;
+        let b2 = varstore::register(&varmap, "b2", Tensor::zeros(1, DType::F32, device)?)?;
 
         Ok(Self {
+            varmap,
             img_dim,
             cond_dim,
             w_cond,
@@ -155,6 +184,13 @@ impl DenoisingModel for SimpleDenoisingCNN {
         Ok(vec![dw_cond, db_cond, dw1, db1, dw2, db2])
     }
 
+}
+
+impl Parameterized for SimpleDenoisingCNN {
+    fn varmap(&self) -> &VarMap {
+        &self.varmap
+    }
+
     fn params(&self) -> Vec<&Tensor> {
         vec![
             &self.w_cond,
@@ -168,16 +204,5 @@ impl DenoisingModel for SimpleDenoisingCNN {
 
     fn param_names(&self) -> Vec<&str> {
         vec!["w_cond", "b_cond", "w1", "b1", "w2", "b2"]
-    }
-
-    fn params_mut(&mut self) -> Vec<&mut Tensor> {
-        vec![
-            &mut self.w_cond,
-            &mut self.b_cond,
-            &mut self.w1,
-            &mut self.b1,
-            &mut self.w2,
-            &mut self.b2,
-        ]
     }
 }

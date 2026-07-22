@@ -1,7 +1,10 @@
 use anyhow::{bail, Ok, Result};
 use candle_core::{DType, Device, Tensor};
+use candle_nn::VarMap;
 
 use super::denoising_model::DenoisingModel;
+use crate::common::parameterized::Parameterized;
+use crate::common::varstore;
 
 // MANUAL BACKPROPAGATION DENOISING MLP
 //
@@ -17,6 +20,13 @@ use super::denoising_model::DenoisingModel;
 // scheduler. If the model predicts that noise well, reverse diffusion can
 // subtract predicted noise step by step.
 pub struct SimpleDenoisingMlp {
+    /// Owns every trainable parameter under its checkpoint name.
+    ///
+    /// The `Tensor` fields below share storage with this map's `Var`s, so an
+    /// optimizer step or checkpoint load written through `set_param()` is
+    /// visible here without reassigning anything.
+    varmap: VarMap,
+
     pub w1: Tensor, // [hidden_dim, in_dim]
     pub b1: Tensor, // [hidden_dim]
     pub w2: Tensor, // [out_dim, hidden_dim]
@@ -76,11 +86,22 @@ impl SimpleDenoisingMlp {
         //
         // v [batch][in_dim] @ w1^T [in_dim][hidden_dim]
         // -> z1 [batch][hidden_dim]
-        let w1 = (Tensor::randn(0.0f32, 1.0f32, (hidden_dim, in_dim), device)? * scale1)?;
+        //
+        // Each parameter is handed to `varstore::register`, which stores it in
+        // the VarMap and gives back the tensor that shares storage with the
+        // stored `Var`. Always keep the returned tensor: the one passed in has
+        // separate storage and would never see an update.
+        let varmap = VarMap::new();
+
+        let w1 = varstore::register(
+            &varmap,
+            "w1",
+            (Tensor::randn(0.0f32, 1.0f32, (hidden_dim, in_dim), device)? * scale1)?,
+        )?;
 
         // Bias starts at zero because random w1 already breaks symmetry.
         // b1 has one value per hidden neuron and is broadcast across the batch.
-        let b1 = Tensor::zeros(hidden_dim, DType::F32, device)?;
+        let b1 = varstore::register(&varmap, "b1", Tensor::zeros(hidden_dim, DType::F32, device)?)?;
 
         // Layer 2 receives hidden activations, so its input width is
         // hidden_dim, not in_dim.
@@ -90,12 +111,22 @@ impl SimpleDenoisingMlp {
         //
         // a1 [batch][hidden_dim] @ w2^T [hidden_dim][out_dim]
         // -> pred [batch][out_dim]
-        let w2 = (Tensor::randn(0.0f32, 1.0f32, (out_dim, hidden_dim), device)? * scale2)?;
+        let w2 = varstore::register(
+            &varmap,
+            "w2",
+            (Tensor::randn(0.0f32, 1.0f32, (out_dim, hidden_dim), device)? * scale2)?,
+        )?;
 
         // b2 is one bias per predicted noise coordinate.
-        let b2 = Tensor::zeros(out_dim, DType::F32, device)?;
+        let b2 = varstore::register(&varmap, "b2", Tensor::zeros(out_dim, DType::F32, device)?)?;
 
-        Ok(Self { w1, b1, w2, b2 })
+        Ok(Self {
+            varmap,
+            w1,
+            b1,
+            w2,
+            b2,
+        })
     }
 
     pub fn forward(&self, v: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
@@ -233,12 +264,14 @@ impl SimpleDenoisingMlp {
         //
         // param = param - lr * grad.
         //
-        // Candle tensor ops return new tensors instead of changing the old
-        // tensor in place, so each updated parameter is assigned back to self.
-        self.w1 = self.w1.sub(&grads.dw1.affine(lr, 0.0)?)?;
-        self.b1 = self.b1.sub(&grads.db1.affine(lr, 0.0)?)?;
-        self.w2 = self.w2.sub(&grads.dw2.affine(lr, 0.0)?)?;
-        self.b2 = self.b2.sub(&grads.db2.affine(lr, 0.0)?)?;
+        // `sub` allocates a fresh tensor, which `set_param` then copies into the
+        // parameter's storage in place. The `self.w1` field observes the write
+        // because it shares that storage with the VarMap entry — nothing is
+        // reassigned here.
+        self.set_param("w1", &self.w1.sub(&grads.dw1.affine(lr, 0.0)?)?)?;
+        self.set_param("b1", &self.b1.sub(&grads.db1.affine(lr, 0.0)?)?)?;
+        self.set_param("w2", &self.w2.sub(&grads.dw2.affine(lr, 0.0)?)?)?;
+        self.set_param("b2", &self.b2.sub(&grads.db2.affine(lr, 0.0)?)?)?;
         Ok(())
     }
 }
@@ -291,12 +324,15 @@ impl DenoisingModel for SimpleDenoisingMlp {
         Ok(vec![grads.dw1, grads.db1, grads.dw2, grads.db2])
     }
 
-    fn params(&self) -> Vec<&Tensor> {
-        vec![&self.w1, &self.b1, &self.w2, &self.b2]
+}
+
+impl Parameterized for SimpleDenoisingMlp {
+    fn varmap(&self) -> &VarMap {
+        &self.varmap
     }
 
-    fn params_mut(&mut self) -> Vec<&mut Tensor> {
-        vec![&mut self.w1, &mut self.b1, &mut self.w2, &mut self.b2]
+    fn params(&self) -> Vec<&Tensor> {
+        vec![&self.w1, &self.b1, &self.w2, &self.b2]
     }
 
     fn param_names(&self) -> Vec<&str> {

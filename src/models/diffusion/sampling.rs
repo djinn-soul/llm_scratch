@@ -320,6 +320,13 @@ pub fn sample_ddpm_cond(
     device: &Device,
 ) -> Result<Tensor> {
     let num_samples = xt.dim(0)?;
+    let class_one_hot_broadcasted;
+    let class_one_hot = if class_one_hot.dim(0)? == 1 && num_samples > 1 {
+        class_one_hot_broadcasted = class_one_hot.broadcast_as((num_samples, class_one_hot.dim(1)?))?;
+        &class_one_hot_broadcasted
+    } else {
+        class_one_hot
+    };
 
     // Pre-extract all schedule coefficients into plain Vecs for fast indexed access.
     // WHY Vec and not Tensor indexing?
@@ -578,6 +585,13 @@ where
         );
     }
     let num_samples = xt.dim(0)?;
+    let class_one_hot_broadcasted;
+    let class_one_hot = if class_one_hot.dim(0)? == 1 && num_samples > 1 {
+        class_one_hot_broadcasted = class_one_hot.broadcast_as((num_samples, class_one_hot.dim(1)?))?;
+        &class_one_hot_broadcasted
+    } else {
+        class_one_hot
+    };
 
     // Pre-extract schedule coefficients into plain Vecs for O(1) indexed access.
     // Avoids repeated Tensor slicing inside the per-step loop.
@@ -1028,6 +1042,13 @@ where
     }
 
     let num_samples = xt.dim(0)?;
+    let class_one_hot_broadcasted;
+    let class_one_hot = if class_one_hot.dim(0)? == 1 && num_samples > 1 {
+        class_one_hot_broadcasted = class_one_hot.broadcast_as((num_samples, class_one_hot.dim(1)?))?;
+        &class_one_hot_broadcasted
+    } else {
+        class_one_hot
+    };
 
     // Pre-extract cumulative alpha products for O(1) lookup per step.
     // DDIM only needs alpha_bar (not beta/alpha/sigma individually) because

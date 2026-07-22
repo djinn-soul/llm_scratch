@@ -4,6 +4,9 @@ use candle_core::{DType, Device, Tensor};
 use super::attention::SpatialSelfAttention;
 use super::denoising_cnn_ops::{manual_conv2d, manual_conv2d_backward};
 use super::DenoisingModel;
+use crate::common::parameterized::Parameterized;
+use crate::common::varstore;
+use candle_nn::VarMap;
 
 const RESIDUAL_SCALE: f64 = 0.7071067811865475;
 const GROUP_NORM_EPS: f64 = 1e-5;
@@ -80,6 +83,11 @@ fn group_norm_backward(
 }
 
 pub struct SimpleDenoisingUNet {
+    /// Owns every trainable parameter — including the attention sub-module's —
+    /// under its checkpoint name. The tensor fields below share storage with
+    /// its `Var`s.
+    varmap: VarMap,
+
     pub img_dim: usize,
     pub cond_dim: usize,
     pub w_cond: Tensor, // [16,cond_dim,1,1]
@@ -119,33 +127,71 @@ impl SimpleDenoisingUNet {
             );
         }
 
+        // Every parameter is registered in the VarMap; keep the tensor that
+        // `register` returns, not the one passed in — only the former shares
+        // storage with the stored `Var` and observes later updates.
+        let varmap = VarMap::new();
+
         let scale_cond = (2.0f64 / cond_dim as f64).sqrt();
-        let w_cond = (Tensor::randn(0.0f32, 1.0f32, (img_dim, cond_dim), device)? * scale_cond)?;
-        let b_cond = Tensor::zeros(img_dim, DType::F32, device)?;
+        let w_cond = varstore::register(
+            &varmap,
+            "w_cond",
+            (Tensor::randn(0.0f32, 1.0f32, (img_dim, cond_dim), device)? * scale_cond)?,
+        )?;
+        let b_cond = varstore::register(
+            &varmap,
+            "b_cond",
+            Tensor::zeros(img_dim, DType::F32, device)?,
+        )?;
         // --- Conv1 weights (2 -> 16 channels, 3x3) ---
         let scale1 = (2.0f64 / (2.0 * 3.0 * 3.0)).sqrt();
-        let w1 = (Tensor::randn(0.0f32, 1.0f32, (16, 2, 3, 3), device)? * scale1)?;
-        let b1 = Tensor::zeros(16, DType::F32, device)?;
+        let w1 = varstore::register(
+            &varmap,
+            "w1",
+            (Tensor::randn(0.0f32, 1.0f32, (16, 2, 3, 3), device)? * scale1)?,
+        )?;
+        let b1 = varstore::register(&varmap, "b1", Tensor::zeros(16, DType::F32, device)?)?;
         // --- Conv2 weights (16 -> 32 channels, 3x3) ---
         let scale2 = (2.0f64 / (16.0 * 3.0 * 3.0)).sqrt();
 
-        let w2 = (Tensor::randn(0.0f32, 1.0f32, (32, 16, 3, 3), device)? * scale2)?;
-        let b2 = Tensor::zeros(32, DType::F32, device)?;
+        let w2 = varstore::register(
+            &varmap,
+            "w2",
+            (Tensor::randn(0.0f32, 1.0f32, (32, 16, 3, 3), device)? * scale2)?,
+        )?;
+        let b2 = varstore::register(&varmap, "b2", Tensor::zeros(32, DType::F32, device)?)?;
         // --- Conv3 weights (32 -> 32 channels, 3x3) ---
         let scale3 = (2.0f64 / (32.0 * 3.0 * 3.0)).sqrt();
-        let w3 = (Tensor::randn(0.0f32, 1.0f32, (32, 32, 3, 3), device)? * scale3)?;
-        let b3 = Tensor::zeros(32, DType::F32, device)?;
+        let w3 = varstore::register(
+            &varmap,
+            "w3",
+            (Tensor::randn(0.0f32, 1.0f32, (32, 32, 3, 3), device)? * scale3)?,
+        )?;
+        let b3 = varstore::register(&varmap, "b3", Tensor::zeros(32, DType::F32, device)?)?;
         // --- Conv4 weights (48 -> 16 channels, 3x3) ---
         let scale4 = (2.0f64 / (48.0 * 3.0 * 3.0)).sqrt();
-        let w4 = (Tensor::randn(0.0f32, 1.0f32, (16, 48, 3, 3), device)? * scale4)?;
-        let b4 = Tensor::zeros(16, DType::F32, device)?;
+        let w4 = varstore::register(
+            &varmap,
+            "w4",
+            (Tensor::randn(0.0f32, 1.0f32, (16, 48, 3, 3), device)? * scale4)?,
+        )?;
+        let b4 = varstore::register(&varmap, "b4", Tensor::zeros(16, DType::F32, device)?)?;
         // --- Conv5 weights (16 -> 1 channel, 3x3) ---
         let scale5 = (2.0f64 / (16.0 * 3.0 * 3.0)).sqrt();
-        let w5 = (Tensor::randn(0.0f32, 1.0f32, (1, 16, 3, 3), device)? * scale5)?;
-        let b5 = Tensor::zeros(1, DType::F32, device)?;
-        let attn = SpatialSelfAttention::new(32, device)?;
+        let w5 = varstore::register(
+            &varmap,
+            "w5",
+            (Tensor::randn(0.0f32, 1.0f32, (1, 16, 3, 3), device)? * scale5)?,
+        )?;
+        let b5 = varstore::register(&varmap, "b5", Tensor::zeros(1, DType::F32, device)?)?;
+
+        // Sub-module registers into this VarMap under the "attn_" prefix, which
+        // reproduces the existing "attn_w_q" / "attn_w_k" / "attn_w_v"
+        // checkpoint keys.
+        let attn = SpatialSelfAttention::new(32, &varmap, "attn_", device)?;
 
         Ok(Self {
+            varmap,
             img_dim,
             cond_dim,
             w_cond,
@@ -403,6 +449,13 @@ impl DenoisingModel for SimpleDenoisingUNet {
             dw_cond, db_cond, dw1, db1, dw2, db2, dw3, db3, dw4, db4, dw5, db5, d_wq, d_wk, d_wv,
         ])
     }
+}
+
+impl Parameterized for SimpleDenoisingUNet {
+    fn varmap(&self) -> &VarMap {
+        &self.varmap
+    }
+
     fn params(&self) -> Vec<&Tensor> {
         vec![
             &self.w_cond,
@@ -420,25 +473,6 @@ impl DenoisingModel for SimpleDenoisingUNet {
             &self.attn.w_q,
             &self.attn.w_k,
             &self.attn.w_v,
-        ]
-    }
-    fn params_mut(&mut self) -> Vec<&mut Tensor> {
-        vec![
-            &mut self.w_cond,
-            &mut self.b_cond,
-            &mut self.w1,
-            &mut self.b1,
-            &mut self.w2,
-            &mut self.b2,
-            &mut self.w3,
-            &mut self.b3,
-            &mut self.w4,
-            &mut self.b4,
-            &mut self.w5,
-            &mut self.b5,
-            &mut self.attn.w_q,
-            &mut self.attn.w_k,
-            &mut self.attn.w_v,
         ]
     }
     fn param_names(&self) -> Vec<&str> {

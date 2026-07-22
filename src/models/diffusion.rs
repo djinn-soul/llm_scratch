@@ -35,7 +35,10 @@ pub use checkpoint::{load_model_checkpoint, save_model_checkpoint};
 pub use denoising_cnn::SimpleDenoisingCNN;
 pub use denoising_cnn_5layers::SimpleDenoisingCNN5Layers;
 pub use denoising_mlp::{Gradients, SimpleDenoisingMlp};
-pub use denoising_model::DenoisingModel;
+// `Parameterized` lives in `common` so optimizers/EMA/checkpoints are not
+// diffusion-specific; re-exported here because every model in this module
+// implements it and callers expect it alongside `DenoisingModel`.
+pub use denoising_model::{DenoisingModel, Parameterized};
 pub use sampling::{sample_ddpm, sample_ddpm_cond, sample_ddpm_from_noise};
 pub use scheduler::BetaScheduler;
 pub use time_embedding::get_time_embedding;
