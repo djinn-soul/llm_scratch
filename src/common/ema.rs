@@ -106,10 +106,19 @@ impl Ema {
             //
             // Both `affine` calls allocate, so the result is independent storage
             // already — no copy needed here.
+            //
+            // `.detach()`, however, is required. `param` is a `Var`, so candle
+            // records a backward graph on everything derived from it, and that
+            // graph node holds clones of its inputs. Without the detach, each
+            // new shadow would pin the previous shadow, which pins the one
+            // before it — a chain growing by one link per training step and
+            // never released. Nothing reads that graph (backprop here is
+            // hand-written), and detach keeps the storage while dropping the
+            // history.
             let updated = shadow
                 .affine(decay, 0.0)?
                 .add(&param.affine(1.0 - decay, 0.0)?)?;
-            *shadow = updated;
+            *shadow = updated.detach();
         }
 
         self.num_samples += 1;

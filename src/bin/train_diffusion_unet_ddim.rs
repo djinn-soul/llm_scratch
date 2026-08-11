@@ -33,8 +33,9 @@ use llm_scratch_rs::models::diffusion::sampling::{
 
 // Model components:
 use llm_scratch_rs::models::diffusion::{
-    get_time_embedding, make_one_hot_cfg, one_hot_class, save_model_checkpoint, BetaScheduler,
-    DenoisingModel, MlpAdamOptimizer, Parameterized, SimpleDenoisingUNet,
+    get_time_embedding, load_model_checkpoint, make_one_hot_cfg, one_hot_class,
+    save_model_checkpoint, BetaScheduler, DenoisingModel, MlpAdamOptimizer, Parameterized,
+    SimpleDenoisingUNet,
 };
 
 // Shared MNIST dataset loader and PNG writer.
@@ -361,8 +362,59 @@ fn main() -> Result<()> {
     let class_one_hot = one_hot_class(sample_class as usize, 10, &device)?;
     let checkpoint_noise = Tensor::randn(0.0f32, 1.0f32, (16, img_dim), &device)?;
 
+    // --- Resume checkpoint support ---
+    let args: Vec<String> = std::env::args().collect();
+    let mut start_epoch = 1;
+
+    if args.len() > 1 {
+        if let Ok(resume_epoch) = args[1].parse::<usize>() {
+            let model_path = format!("unet_checkpoints/epoch_{resume_epoch:04}.safetensors");
+            let opt_path = format!("unet_checkpoints/opt_epoch_{resume_epoch:04}.safetensors");
+            let ema_path = format!("unet_checkpoints/ema_epoch_{resume_epoch:04}.safetensors");
+
+            if std::path::Path::new(&model_path).exists() && std::path::Path::new(&opt_path).exists() {
+                println!("Resuming training from epoch {}...", resume_epoch);
+                load_model_checkpoint(&model, &model_path, &device)?;
+                optimizer.load_checkpoint(&opt_path, &device)?;
+
+                if std::path::Path::new(&ema_path).exists() {
+                    let temp_ema_model = SimpleDenoisingUNet::new(img_dim, cond_dim, &device)?;
+                    load_model_checkpoint(&temp_ema_model, &ema_path, &device)?;
+                    ema.shadow_params = temp_ema_model
+                        .params()
+                        .iter()
+                        .map(|p| (*p).copy().map_err(Into::into))
+                        .collect::<Result<Vec<_>>>()?;
+                    ema.num_samples = optimizer.t;
+                }
+
+                start_epoch = resume_epoch + 1;
+                println!(
+                    "Successfully resumed model & optimizer state at step t = {}",
+                    optimizer.t
+                );
+            } else {
+                println!(
+                    "Warning: Requested resume epoch {} but checkpoint files were not found.",
+                    resume_epoch
+                );
+            }
+        }
+    }
+
+    // Create the checkpoint directory up front, not lazily at the first save.
+    //
+    // The periodic block below writes the model weights and optimizer state
+    // before it reaches `save_fixed_noise_checkpoint`, which used to be the only
+    // caller of `create_dir_all`. On a clean tree that ordering made the very
+    // first checkpoint fail with "The system cannot find the path specified"
+    // and take the whole run down with it — after the full interval of training
+    // had already been spent. Creating the directory before the loop means a
+    // missing path can no longer surface hours in.
+    std::fs::create_dir_all("unet_checkpoints")?;
+
     let num_epochs = 8000;
-    println!("Starting U-Net training for {} epochs...", num_epochs);
+    println!("Starting U-Net training for {} epochs (from epoch {})...", num_epochs, start_epoch);
 
     let start_time = std::time::Instant::now();
 
@@ -403,7 +455,7 @@ fn main() -> Result<()> {
     //
     // Noise prediction (b) gives the most uniform gradient magnitudes
     // across timesteps, leading to faster and more stable training.
-    for epoch in 1..=num_epochs {
+    for epoch in start_epoch..=num_epochs {
         // --- Step 1: Sample a random minibatch of training images. ---
         // Generate random indices in [0, total_samples) as floats, then cast
         // to u32. This avoids needing a dedicated integer RNG.
@@ -526,6 +578,36 @@ fn main() -> Result<()> {
             save_model_checkpoint(
                 &model,
                 format!("unet_checkpoints/epoch_{epoch:04}.safetensors"),
+            )?;
+            // Optimizer state is saved under the same epoch tag as the online
+            // weights above, and must stay paired with them: resuming these
+            // weights with zeroed Adam moments (or a reset `t`, which re-applies
+            // bias correction) produces a loss spike at restart.
+            //
+            // Deliberately saved before the EMA swap below — the EMA weights are
+            // an evaluation artifact, and Adam's moments belong to the online
+            // weights being trained.
+            optimizer
+                .save_checkpoint(format!("unet_checkpoints/opt_epoch_{epoch:04}.safetensors"))?;
+
+            let online_generated = sample_ddim_cfg_strided_with_call_back(
+                &model,
+                &scheduler,
+                checkpoint_noise.clone(),
+                SAMPLING_START_TIMESTEP,
+                20, // 20 strided DDIM steps
+                img_dim,
+                time_emb_dim,
+                &class_one_hot,
+                1.0,
+                &device,
+                |_, _| Ok(()),
+            )?;
+            save_grid_png(
+                &format!("unet_checkpoints/epoch_{epoch:04}_online_grid.png"),
+                &online_generated.flatten_all()?.to_vec1::<f32>()?,
+                4,
+                4,
             )?;
             // --- NON-DESTRUCTIVE EMA EVALUATION ---
             // A. Backup live training weights

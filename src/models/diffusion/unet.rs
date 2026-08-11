@@ -258,8 +258,28 @@ impl DenoisingModel for SimpleDenoisingUNet {
         let z3_res = z3_conv.add(&a2)?.affine(RESIDUAL_SCALE, 0.0)?;
         let (z3, z3_hat, z3_inv_std) = group_norm_forward(&z3_res, 4)?;
         let a3_pre = leaky_relu(&z3)?;
-        // Apply self-attention at the bottleneck
-        let (a3, attn_cached) = self.attn.forward(&a3_pre)?;
+        // Apply self-attention at the bottleneck, as a RESIDUAL.
+        //
+        // WHY the residual is not optional here:
+        //   Softmax attention over n = 196 bottleneck positions starts life
+        //   near-uniform (measured at init: 98.5% of the uniform entropy bound).
+        //   A uniform attention row makes every output position the same global
+        //   mean of V, which erases spatial structure — measured at init, the
+        //   raw attention output retains 0.6% of its input's spatial variance.
+        //
+        //   That is normal and harmless in the standard formulation `x +
+        //   attn(x)`, where the skip carries the signal while attention
+        //   gradually learns structure worth adding. Applied *without* a skip,
+        //   the same collapse instead deletes a3_pre from the decoder path
+        //   entirely, leaving the bottleneck contributing only a per-channel
+        //   constant and the a1 skip doing all the spatial work. It also starves
+        //   w_q/w_k of gradient, so the network drifts further into the flat
+        //   regime rather than out of it.
+        //
+        // Scaled by 1/sqrt(2) to keep the sum's variance near the input scale,
+        // matching the z3_res / z4_res residuals above and below.
+        let (attn_out, attn_cached) = self.attn.forward(&a3_pre)?;
+        let a3 = a3_pre.add(&attn_out)?.affine(RESIDUAL_SCALE, 0.0)?;
         // decoder level(28*28)
 
         let a3_up = a3
@@ -385,10 +405,19 @@ impl DenoisingModel for SimpleDenoisingUNet {
             .sum(5)?
             .sum(3)?;
 
-        //7. Attention backward
-        // Backpropagate through attention layer
-        let (delta_a3_pre, d_wq, d_wk, d_wv) =
-            self.attn.backward(&intermediates[20..26], &delta_a3)?;
+        //7. Attention backward (residual)
+        //
+        // Forward was: a3 = (a3_pre + attn(a3_pre)) * RESIDUAL_SCALE
+        //
+        // So the upstream gradient is first scaled, then splits along both
+        // branches of the sum: one copy flows through the attention block, and
+        // one copy reaches a3_pre directly. The direct path is the whole point
+        // of the residual — it keeps gradient reaching the bottleneck conv
+        // stack even while attention sits in its near-uniform regime.
+        let delta_a3_scaled = delta_a3.affine(RESIDUAL_SCALE, 0.0)?;
+        let (delta_a3_pre_from_attn, d_wq, d_wk, d_wv) =
+            self.attn.backward(&intermediates[20..26], &delta_a3_scaled)?;
+        let delta_a3_pre = delta_a3_pre_from_attn.add(&delta_a3_scaled)?;
 
         //8. Leaky relu backward on z3
 

@@ -106,48 +106,45 @@ pub fn manual_conv2d(
         x_padded_y
     };
 
-    use rayon::prelude::*;
-
-    // --- Parallel per-position matmuls ---------------------------------------
-    // Each closure captures clones of x_padded and w (cheap: Tensor is an
-    // Arc wrapper over the data buffer, so clone is O(1)).
-    let results: Result<Vec<Tensor>> = (0..kh)
-        .into_par_iter()
-        .flat_map(|dy| {
-            let x_padded = x_padded.clone();
-            let w = w.clone();
-            (0..kw).into_par_iter().map(move |dx| {
-                // Extract the spatial slice at kernel offset (dy, dx).
-                let x_slice = x_padded.narrow(2, dy, h)?.narrow(3, dx, w_img)?;
-
-                // Reshape to (C_in, B*H*W) for the matmul.
-                let x_flat = x_slice.reshape((b, c_in, h * w_img))?;
-                let x_perm = x_flat.permute((1, 0, 2))?.reshape((c_in, b * h * w_img))?;
-
-                // w_slice: (C_out, C_in) — weights for this kernel position.
-                let w_slice = w
-                    .narrow(2, dy, 1)?
-                    .narrow(3, dx, 1)?
-                    .reshape((c_out, c_in))?;
-
-                // out_slice = w_slice @ x_perm  → (C_out, B*H*W)
-                // .contiguous() ensures the matmul operates on a dense layout,
-                // avoiding potential incorrect results from non-contiguous strides.
-                let out_slice = w_slice.contiguous()?.matmul(&x_perm.contiguous()?)?;
-
-                // Reshape (C_out, B*H*W) → (B, C_out, H, W).
-                let out_reshaped = out_slice
-                    .reshape((c_out, b, h, w_img))?
-                    .permute((1, 0, 2, 3))?;
-                Ok(out_reshaped)
-            })
-        })
-        .collect();
-
-    // Accumulate all position contributions into a single output tensor.
+    // --- Sequential per-position matmuls, folded straight into the accumulator --
+    //
+    // WHY sequential instead of rayon here?
+    //   Collecting all kh*kw position outputs into a Vec before summing (the
+    //   previous approach) keeps every one of them alive simultaneously — a
+    //   kh*kw-fold peak memory multiplier on top of the accumulator itself.
+    //   Folding each position straight into `y` as it's computed caps the
+    //   extra live memory at one position's worth, regardless of kernel size.
+    //   Candle's matmul is already internally parallel (BLAS/cuBLAS), so the
+    //   rayon layer here was CPU-thread parallelism over tiny per-position
+    //   work, not the dominant cost — trading it away buys back memory
+    //   headroom that matters far more on memory-constrained boxes.
     let mut y = Tensor::zeros((b, c_out, h, w_img), DType::F32, device)?;
-    for out_reshaped in results? {
-        y = y.add(&out_reshaped)?;
+    for dy in 0..kh {
+        for dx in 0..kw {
+            // Extract the spatial slice at kernel offset (dy, dx).
+            let x_slice = x_padded.narrow(2, dy, h)?.narrow(3, dx, w_img)?;
+
+            // Reshape to (C_in, B*H*W) for the matmul.
+            let x_flat = x_slice.reshape((b, c_in, h * w_img))?;
+            let x_perm = x_flat.permute((1, 0, 2))?.reshape((c_in, b * h * w_img))?;
+
+            // w_slice: (C_out, C_in) — weights for this kernel position.
+            let w_slice = w
+                .narrow(2, dy, 1)?
+                .narrow(3, dx, 1)?
+                .reshape((c_out, c_in))?;
+
+            // out_slice = w_slice @ x_perm  → (C_out, B*H*W)
+            // .contiguous() ensures the matmul operates on a dense layout,
+            // avoiding potential incorrect results from non-contiguous strides.
+            let out_slice = w_slice.contiguous()?.matmul(&x_perm.contiguous()?)?;
+
+            // Reshape (C_out, B*H*W) → (B, C_out, H, W) and fold in immediately.
+            let out_reshaped = out_slice
+                .reshape((c_out, b, h, w_img))?
+                .permute((1, 0, 2, 3))?;
+            y = y.add(&out_reshaped)?;
+        }
     }
 
     // Add bias, broadcast (1, C_out, 1, 1) → (B, C_out, H, W).
@@ -279,98 +276,78 @@ pub fn manual_conv2d_backward(
     let pad_h = (kh - 1) as i32 / 2;
     let pad_w = (kw - 1) as i32 / 2;
 
-    use rayon::prelude::*;
-
-    // --- Parallel computation of (dx_shifted, dw_slice) per (dy, dx) --------
-    // Each result tuple holds:
-    //   .0 = dx_shifted — input gradient contribution for this position
-    //   .1 = dw_slice   — weight gradient for this position, shape (C_out, C_in, 1, 1)
-    let results: Result<Vec<(Tensor, Tensor)>> = (0..kh)
-        .into_par_iter()
-        .flat_map(|dy| {
-            let x = x.clone();
-            let w = w.clone();
-            let delta_y = delta_y.clone();
-            (0..kw).into_par_iter().map(move |dx| {
-                // sy, sx: the backward shift that undoes the forward narrowing.
-                //   Forward at (dy, dx) read x_padded[dy..dy+H, dx..dx+W].
-                //   Backward shift = (pad_h - dy, pad_w - dx).
-                let sy = pad_h - (dy as i32);
-                let sx = pad_w - (dx as i32);
-
-                // x_slice: the same input patch that forward saw at (dy, dx).
-                let x_slice = shift_and_pad(&x, sy, sx, device)?;
-                let x_flat = x_slice.reshape((b, c_in, h * w_img))?;
-                // x_perm shape: (C_in, B*H*W)
-                let x_perm = x_flat.permute((1, 0, 2))?.reshape((c_in, b * h * w_img))?;
-
-                // Flatten delta_y for this position: shape (C_out, B*H*W).
-                // We use the same delta_y for all positions (it's the output
-                // gradient which doesn't vary with (dy, dx)).
-                let delta_out_slice = delta_y
-                    .reshape((b, c_out, h * w_img))?
-                    .permute((1, 0, 2))?
-                    .reshape((c_out, b * h * w_img))?;
-
-                // --- Weight gradient for this (dy, dx) -----------------------
-                // dw_slice = delta_y_flat @ x_perm^T  → (C_out, C_in)
-                // Reshaped to (C_out, C_in, 1, 1) for assembly into (C_out, C_in, kH, kW).
-                let dw_slice = delta_out_slice
-                    .contiguous()?
-                    .matmul(&x_perm.t()?.contiguous()?)?
-                    .reshape((c_out, c_in, 1, 1))?;
-
-                // --- Input gradient for this (dy, dx) ------------------------
-                // w_slice: (C_out, C_in) — same kernel slice as in forward.
-                let w_slice = w
-                    .narrow(2, dy, 1)?
-                    .narrow(3, dx, 1)?
-                    .reshape((c_out, c_in))?;
-
-                // dx_perm = w_slice^T @ delta_y_flat  → (C_in, B*H*W)
-                let dx_perm = w_slice
-                    .t()?
-                    .contiguous()?
-                    .matmul(&delta_out_slice.contiguous()?)?;
-
-                // Reshape to (B, C_in, H, W).
-                let dx_slice = dx_perm
-                    .reshape((c_in, b, h * w_img))?
-                    .permute((1, 0, 2))?
-                    .reshape((b, c_in, h, w_img))?;
-
-                // Reverse the forward shift to align with the unpadded input.
-                // WHY -sy, -sx? We shifted x forward by (sy, sx) to extract
-                // the patch; the inverse shift puts the gradient back in the
-                // correct coordinate frame.
-                let dx_shifted = shift_and_pad(&dx_slice, -sy, -sx, device)?;
-                Ok((dx_shifted, dw_slice))
-            })
-        })
-        .collect();
-
-    let results_resolved = results?;
-
-    // --- Accumulate input gradients ------------------------------------------
-    // Sum all kh*kw position contributions into delta_x.
+    // --- Sequential per-position computation, folded straight into delta_x ---
+    //
+    // WHY sequential instead of rayon here?
+    //   Same reasoning as manual_conv2d's forward: collecting all kh*kw
+    //   (dx_shifted, dw_slice) pairs before summing kept every dx_shifted
+    //   alive at once — each one full (B, C_in, H, W), the dominant memory
+    //   cost of this function. Folding delta_x immediately caps that to one
+    //   position's worth. dw_slice stays cheap ((C_out, C_in, 1, 1)) and is
+    //   collected into a small Vec for the final cat — that part is unchanged.
     let mut delta_x = Tensor::zeros((b, c_in, h, w_img), DType::F32, device)?;
-    for (dx_shifted, _) in &results_resolved {
-        delta_x = delta_x.add(dx_shifted)?;
-    }
-
-    // --- Assemble weight gradient tensor (C_out, C_in, kH, kW) --------------
-    // The flat results Vec is indexed by (dy * kw + dx), so we reassemble
-    // row-by-row (dy outer, dx inner) to reconstruct the 4-D weight gradient.
     let mut dw_dy_list = Vec::with_capacity(kh);
     for dy in 0..kh {
         let mut dw_dx_list = Vec::with_capacity(kw);
         for dx in 0..kw {
-            let idx = dy * kw + dx;
-            // Each slice has shape (C_out, C_in, 1, 1); cat along dim 3 → kW.
-            dw_dx_list.push(&results_resolved[idx].1);
+            // sy, sx: the backward shift that undoes the forward narrowing.
+            //   Forward at (dy, dx) read x_padded[dy..dy+H, dx..dx+W].
+            //   Backward shift = (pad_h - dy, pad_w - dx).
+            let sy = pad_h - (dy as i32);
+            let sx = pad_w - (dx as i32);
+
+            // x_slice: the same input patch that forward saw at (dy, dx).
+            let x_slice = shift_and_pad(x, sy, sx, device)?;
+            let x_flat = x_slice.reshape((b, c_in, h * w_img))?;
+            // x_perm shape: (C_in, B*H*W)
+            let x_perm = x_flat.permute((1, 0, 2))?.reshape((c_in, b * h * w_img))?;
+
+            // Flatten delta_y for this position: shape (C_out, B*H*W).
+            // We use the same delta_y for all positions (it's the output
+            // gradient which doesn't vary with (dy, dx)).
+            let delta_out_slice = delta_y
+                .reshape((b, c_out, h * w_img))?
+                .permute((1, 0, 2))?
+                .reshape((c_out, b * h * w_img))?;
+
+            // --- Weight gradient for this (dy, dx) -----------------------
+            // dw_slice = delta_y_flat @ x_perm^T  → (C_out, C_in)
+            // Reshaped to (C_out, C_in, 1, 1) for assembly into (C_out, C_in, kH, kW).
+            let dw_slice = delta_out_slice
+                .contiguous()?
+                .matmul(&x_perm.t()?.contiguous()?)?
+                .reshape((c_out, c_in, 1, 1))?;
+            dw_dx_list.push(dw_slice);
+
+            // --- Input gradient for this (dy, dx) ------------------------
+            // w_slice: (C_out, C_in) — same kernel slice as in forward.
+            let w_slice = w
+                .narrow(2, dy, 1)?
+                .narrow(3, dx, 1)?
+                .reshape((c_out, c_in))?;
+
+            // dx_perm = w_slice^T @ delta_y_flat  → (C_in, B*H*W)
+            let dx_perm = w_slice
+                .t()?
+                .contiguous()?
+                .matmul(&delta_out_slice.contiguous()?)?;
+
+            // Reshape to (B, C_in, H, W).
+            let dx_slice = dx_perm
+                .reshape((c_in, b, h * w_img))?
+                .permute((1, 0, 2))?
+                .reshape((b, c_in, h, w_img))?;
+
+            // Reverse the forward shift to align with the unpadded input.
+            // WHY -sy, -sx? We shifted x forward by (sy, sx) to extract
+            // the patch; the inverse shift puts the gradient back in the
+            // correct coordinate frame.
+            let dx_shifted = shift_and_pad(&dx_slice, -sy, -sx, device)?;
+            delta_x = delta_x.add(&dx_shifted)?;
         }
         // Concatenate across the kW dimension for this row.
-        let dw_dy = Tensor::cat(&dw_dx_list, 3)?;
+        let dw_dx_refs: Vec<&Tensor> = dw_dx_list.iter().collect();
+        let dw_dy = Tensor::cat(&dw_dx_refs, 3)?;
         dw_dy_list.push(dw_dy);
     }
 
