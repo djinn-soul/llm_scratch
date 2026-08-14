@@ -353,12 +353,12 @@ impl MlpAdamOptimizer {
         for (name, state) in self.param_names.iter().zip(self.states.iter()) {
             let (m_key, v_key) = Self::moment_keys(name);
 
-            let m = loaded.get(&m_key).ok_or_else(|| {
-                anyhow::anyhow!("optimizer checkpoint is missing moment {m_key}")
-            })?;
-            let v = loaded.get(&v_key).ok_or_else(|| {
-                anyhow::anyhow!("optimizer checkpoint is missing moment {v_key}")
-            })?;
+            let m = loaded
+                .get(&m_key)
+                .ok_or_else(|| anyhow::anyhow!("optimizer checkpoint is missing moment {m_key}"))?;
+            let v = loaded
+                .get(&v_key)
+                .ok_or_else(|| anyhow::anyhow!("optimizer checkpoint is missing moment {v_key}"))?;
 
             if m.dims() != state.m.dims() || v.dims() != state.v.dims() {
                 bail!(

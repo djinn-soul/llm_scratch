@@ -94,7 +94,8 @@ fn bottleneck_attention_preserves_spatial_structure() -> Result<()> {
     let output_var = mean_spatial_variance(&a3_seq)?;
 
     let score_values = scores.flatten_all()?.to_vec1::<f32>()?;
-    let score_mean = score_values.iter().map(|v| *v as f64).sum::<f64>() / score_values.len() as f64;
+    let score_mean =
+        score_values.iter().map(|v| *v as f64).sum::<f64>() / score_values.len() as f64;
     let score_std = (score_values
         .iter()
         .map(|v| {

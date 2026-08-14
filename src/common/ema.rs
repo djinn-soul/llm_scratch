@@ -151,10 +151,9 @@ impl Ema {
 
     /// Put the weights saved by `store()` back into the model.
     pub fn restore(&mut self, target: &dyn Parameterized) -> Result<()> {
-        let backup = self
-            .backup
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("Ema::restore: no backup available; call store() first"))?;
+        let backup = self.backup.take().ok_or_else(|| {
+            anyhow::anyhow!("Ema::restore: no backup available; call store() first")
+        })?;
 
         let named = target.named_params()?;
         if named.len() != backup.len() {

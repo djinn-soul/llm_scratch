@@ -86,8 +86,7 @@ fn main() -> Result<()> {
     // Recreate the exact architecture before assigning tensors from disk. The
     // checkpoint loader validates parameter names and shapes, so architecture
     // drift fails here instead of producing a misleading image.
-    let model =
-        SimpleDenoisingUNet::new(IMAGE_SIZE, TIME_EMBEDDING_SIZE + CLASS_COUNT, &device)?;
+    let model = SimpleDenoisingUNet::new(IMAGE_SIZE, TIME_EMBEDDING_SIZE + CLASS_COUNT, &device)?;
     load_model_checkpoint(&model, &checkpoint, &device)?;
     let initial_noise = load_fixed_noise(&checkpoint, &device)?;
     let class = one_hot_class(SAMPLE_CLASS, CLASS_COUNT, &device)?;

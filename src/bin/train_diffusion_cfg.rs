@@ -47,7 +47,8 @@ use llm_scratch_rs::models::diffusion::sampling::sample_ddpm_cfg;
 
 // Standard diffusion model components.
 use llm_scratch_rs::models::diffusion::{
-    get_time_embedding, BetaScheduler, DenoisingModel, MlpAdamOptimizer, Parameterized, SimpleDenoisingCNN,
+    get_time_embedding, BetaScheduler, DenoisingModel, MlpAdamOptimizer, Parameterized,
+    SimpleDenoisingCNN,
 };
 
 // Shared MNIST download + parse helpers and PNG writer.

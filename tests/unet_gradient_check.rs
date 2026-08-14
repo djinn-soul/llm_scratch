@@ -48,11 +48,17 @@ fn numeric_grad(
     // `Tensor::from_vec` allocates fresh storage, which `set_param` requires —
     // candle rejects writing a variable from a tensor derived from its own value.
     values[idx] = saved + eps;
-    unet.set_param(name, &Tensor::from_vec(values.clone(), dims.clone(), device)?)?;
+    unet.set_param(
+        name,
+        &Tensor::from_vec(values.clone(), dims.clone(), device)?,
+    )?;
     let plus = loss_of(unet, v, target)?;
 
     values[idx] = saved - eps;
-    unet.set_param(name, &Tensor::from_vec(values.clone(), dims.clone(), device)?)?;
+    unet.set_param(
+        name,
+        &Tensor::from_vec(values.clone(), dims.clone(), device)?,
+    )?;
     let minus = loss_of(unet, v, target)?;
 
     values[idx] = saved;

@@ -101,7 +101,11 @@ impl SimpleDenoisingMlp {
 
         // Bias starts at zero because random w1 already breaks symmetry.
         // b1 has one value per hidden neuron and is broadcast across the batch.
-        let b1 = varstore::register(&varmap, "b1", Tensor::zeros(hidden_dim, DType::F32, device)?)?;
+        let b1 = varstore::register(
+            &varmap,
+            "b1",
+            Tensor::zeros(hidden_dim, DType::F32, device)?,
+        )?;
 
         // Layer 2 receives hidden activations, so its input width is
         // hidden_dim, not in_dim.
@@ -323,7 +327,6 @@ impl DenoisingModel for SimpleDenoisingMlp {
         // Return gradients in the same order as params(): w1, b1, w2, b2.
         Ok(vec![grads.dw1, grads.db1, grads.dw2, grads.db2])
     }
-
 }
 
 impl Parameterized for SimpleDenoisingMlp {

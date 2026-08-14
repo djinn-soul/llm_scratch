@@ -183,7 +183,6 @@ impl DenoisingModel for SimpleDenoisingCNN {
 
         Ok(vec![dw_cond, db_cond, dw1, db1, dw2, db2])
     }
-
 }
 
 impl Parameterized for SimpleDenoisingCNN {

@@ -428,7 +428,6 @@ impl DenoisingModel for SimpleDenoisingCNN5Layers {
             dw_cond, db_cond, dw1, db1, dw2, db2, dw3, db3, dw4, db4, dw5, db5,
         ])
     }
-
 }
 
 // =============================================================================

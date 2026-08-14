@@ -47,7 +47,8 @@ use llm_scratch_rs::models::diffusion::sampling::sample_ddpm_cfg;
 
 // 5-layer CNN model components.
 use llm_scratch_rs::models::diffusion::{
-    get_time_embedding, BetaScheduler, DenoisingModel, MlpAdamOptimizer, Parameterized, SimpleDenoisingCNN5Layers,
+    get_time_embedding, BetaScheduler, DenoisingModel, MlpAdamOptimizer, Parameterized,
+    SimpleDenoisingCNN5Layers,
 };
 
 // Shared MNIST I/O utilities.

@@ -109,7 +109,6 @@ impl DenoisingModel for ZeroNoiseModel {
     ) -> Result<Vec<Tensor>> {
         Ok(Vec::new())
     }
-
 }
 
 impl Parameterized for ZeroNoiseModel {

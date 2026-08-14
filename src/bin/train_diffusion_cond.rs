@@ -35,8 +35,8 @@ use candle_core::{DType, Device, Tensor};
 //   SimpleDenoisingMlp  — two-layer fully-connected denoising network
 //   sample_ddpm_cond    — shared reverse diffusion sampler with class conditioning
 use llm_scratch_rs::models::diffusion::{
-    get_time_embedding, sample_ddpm_cond, BetaScheduler, DenoisingModel, MlpAdamOptimizer, Parameterized,
-    SimpleDenoisingMlp,
+    get_time_embedding, sample_ddpm_cond, BetaScheduler, DenoisingModel, MlpAdamOptimizer,
+    Parameterized, SimpleDenoisingMlp,
 };
 
 // Shared MNIST helpers: download, parse binary files, build one-hot tensors,

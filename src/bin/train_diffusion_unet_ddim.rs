@@ -372,7 +372,9 @@ fn main() -> Result<()> {
             let opt_path = format!("unet_checkpoints/opt_epoch_{resume_epoch:04}.safetensors");
             let ema_path = format!("unet_checkpoints/ema_epoch_{resume_epoch:04}.safetensors");
 
-            if std::path::Path::new(&model_path).exists() && std::path::Path::new(&opt_path).exists() {
+            if std::path::Path::new(&model_path).exists()
+                && std::path::Path::new(&opt_path).exists()
+            {
                 println!("Resuming training from epoch {}...", resume_epoch);
                 load_model_checkpoint(&model, &model_path, &device)?;
                 optimizer.load_checkpoint(&opt_path, &device)?;
@@ -414,7 +416,10 @@ fn main() -> Result<()> {
     std::fs::create_dir_all("unet_checkpoints")?;
 
     let num_epochs = 8000;
-    println!("Starting U-Net training for {} epochs (from epoch {})...", num_epochs, start_epoch);
+    println!(
+        "Starting U-Net training for {} epochs (from epoch {})...",
+        num_epochs, start_epoch
+    );
 
     let start_time = std::time::Instant::now();
 

@@ -415,8 +415,9 @@ impl DenoisingModel for SimpleDenoisingUNet {
         // of the residual — it keeps gradient reaching the bottleneck conv
         // stack even while attention sits in its near-uniform regime.
         let delta_a3_scaled = delta_a3.affine(RESIDUAL_SCALE, 0.0)?;
-        let (delta_a3_pre_from_attn, d_wq, d_wk, d_wv) =
-            self.attn.backward(&intermediates[20..26], &delta_a3_scaled)?;
+        let (delta_a3_pre_from_attn, d_wq, d_wk, d_wv) = self
+            .attn
+            .backward(&intermediates[20..26], &delta_a3_scaled)?;
         let delta_a3_pre = delta_a3_pre_from_attn.add(&delta_a3_scaled)?;
 
         //8. Leaky relu backward on z3

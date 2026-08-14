@@ -31,8 +31,8 @@ use candle_core::{DType, Device, Tensor};
 //   `SimpleDenoisingMlp`    — two-layer MLP: input → hidden → output
 //   `sample_ddpm_from_noise`— shared reverse diffusion sampler (unconditional)
 use llm_scratch_rs::models::diffusion::{
-    get_time_embedding, sample_ddpm_from_noise, BetaScheduler, DenoisingModel, MlpAdamOptimizer, Parameterized,
-    SimpleDenoisingMlp,
+    get_time_embedding, sample_ddpm_from_noise, BetaScheduler, DenoisingModel, MlpAdamOptimizer,
+    Parameterized, SimpleDenoisingMlp,
 };
 
 // Shared MNIST utilities: download + cache + parse binary files, save PNGs.

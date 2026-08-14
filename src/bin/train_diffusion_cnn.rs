@@ -57,7 +57,8 @@ use llm_scratch_rs::models::diffusion::sampling::sample_ddpm_cfg;
 //   MlpAdamOptimizer    — generic Adam optimizer (works with any DenoisingModel)
 //   SimpleDenoisingCNN  — 2-layer CNN denoiser
 use llm_scratch_rs::models::diffusion::{
-    get_time_embedding, BetaScheduler, DenoisingModel, MlpAdamOptimizer, Parameterized, SimpleDenoisingCNN,
+    get_time_embedding, BetaScheduler, DenoisingModel, MlpAdamOptimizer, Parameterized,
+    SimpleDenoisingCNN,
 };
 
 // Shared MNIST dataset loader and PNG writer.
