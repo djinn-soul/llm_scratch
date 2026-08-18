@@ -150,6 +150,14 @@ impl MlpAdamOptimizer {
             );
         }
 
+        // Bias correction factors are constant across all parameters for step t.
+        let bc1 = 1.0 - beta1.powi(t as i32);
+        let bc2 = 1.0 - beta2.powi(t as i32);
+        let step_size = lr / bc1;
+        let v_scale = 1.0 / bc2;
+        let one_minus_beta1 = 1.0 - beta1;
+        let one_minus_beta2 = 1.0 - beta2;
+
         for (((param, state), grad), name) in params
             .iter()
             .zip(self.states.iter_mut())
@@ -165,7 +173,7 @@ impl MlpAdamOptimizer {
             let m_new = state
                 .m
                 .affine(beta1, 0.0)?
-                .add(&grad.affine(1.0 - beta1, 0.0)?)?;
+                .add(&grad.affine(one_minus_beta1, 0.0)?)?;
 
             // Second moment:
             //
@@ -176,26 +184,16 @@ impl MlpAdamOptimizer {
             let v_new = state
                 .v
                 .affine(beta2, 0.0)?
-                .add(&grad_sq.affine(1.0 - beta2, 0.0)?)?;
-
-            // Bias correction:
-            //
-            // Since m and v start at zero, their first few values are
-            // biased low. Dividing by (1 - beta^t) corrects that startup
-            // bias.
-            let bc1 = 1.0 - beta1.powi(t as i32);
-            let bc2 = 1.0 - beta2.powi(t as i32);
-            let m_hat = m_new.affine(1.0 / bc1, 0.0)?;
-            let v_hat = v_new.affine(1.0 / bc2, 0.0)?;
+                .add(&grad_sq.affine(one_minus_beta2, 0.0)?)?;
 
             // Adam update:
             //
-            // update = lr * m_hat / (sqrt(v_hat) + eps)
+            // update = (lr / bc1) * m_new / (sqrt(v_new / bc2) + eps)
             // param  = param - update
             //
             // eps avoids division by zero when v_hat is extremely small.
-            let num = m_hat.affine(lr, 0.0)?;
-            let den = v_hat.sqrt()?.affine(1.0, eps)?;
+            let num = m_new.affine(step_size, 0.0)?;
+            let den = v_new.affine(v_scale, 0.0)?.sqrt()?.affine(1.0, eps)?;
             let update = num.div(&den)?;
 
             // `sub` allocates a fresh tensor, which `set_param` copies into the

@@ -22,6 +22,7 @@ pub mod sampling;
 pub mod scheduler;
 pub mod time_embedding;
 pub mod unet;
+// pub mod dit;
 
 #[cfg(test)]
 // Cross-module reverse-sampling regressions use a deliberately empty model.
@@ -39,7 +40,10 @@ pub use denoising_mlp::{Gradients, SimpleDenoisingMlp};
 // diffusion-specific; re-exported here because every model in this module
 // implements it and callers expect it alongside `DenoisingModel`.
 pub use denoising_model::{DenoisingModel, Parameterized};
-pub use sampling::{sample_ddpm, sample_ddpm_cond, sample_ddpm_from_noise};
+pub use sampling::{
+    sample_ddim_cfg_strided_with_call_back, sample_ddpm, sample_ddpm_cond, sample_ddpm_from_noise,
+    sample_diffusion_cfg, sample_dpm_solver_2m_cfg_strided_with_callback, SamplerKind,
+};
 pub use scheduler::BetaScheduler;
 pub use time_embedding::get_time_embedding;
-pub use unet::SimpleDenoisingUNet;
+pub use unet::{SimpleDenoisingUNet, SimpleDenoisingUNetAdaGN};

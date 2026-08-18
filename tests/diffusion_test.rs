@@ -356,20 +356,22 @@ fn test_cnn_5layers_forward_backward_update() -> Result<()> {
 // =============================================================================
 //
 // End-to-end shape and update test for SimpleDenoisingUNet:
-//   1. Forward: verify output (B, img_dim) and 26 cached intermediate tensors.
-//   2. Backward: verify 15 gradient tensors matching parameter shapes.
+//   1. Forward: verify output (B, img_dim) and 21 cached intermediate tensors.
+//   2. Backward: verify 13 gradient tensors matching parameter shapes.
 //   3. SGD step update verification.
 //
-// WHY 26 intermediates (vs 9 for the 5-layer CNN)?
-//   The U-Net caches skip-connection tensors alongside the usual
-//   (pre-act, post-act) pairs. Each encoder level saves its output for
+// WHY 21 intermediates (vs 9 for the 5-layer CNN)?
+//   The U-Net caches skip-connection tensors alongside the layer activations
+//   and group norm statistics. Each encoder level saves its output for
 //   concatenation with the corresponding decoder level. The bottleneck,
-//   upsampling, and conditioning layers add further cached tensors.
+//   upsampling, and conditioning layers add further cached tensors (16 total).
+//   The attention block caches 5 tensors [x_seq, q, k, v, attn_weights];
+//   raw scores are not cached since the backward pass only needs the weights.
 //
-// WHY 15 gradients (vs 12 for the 5-layer CNN)?
-//   The U-Net has 5 conv layers + conditioning projection + 2 extra
-//   normalization or projection layers. Each contributes a (weight, bias)
-//   pair, plus the conditioning layer's (w, b) = 15 gradient tensors.
+// WHY 13 gradients (vs 12 for the 5-layer CNN)?
+//   The U-Net has 5 conv layers + conditioning projection, each contributing
+//   a (weight, bias) pair = 12 tensors, plus 1 fused attention projection
+//   weight (w_qkv) = 13 gradient tensors total.
 //
 // Skip-connection gradient shapes:
 //   The decoder layers receive concatenated inputs from the encoder skip
@@ -391,13 +393,13 @@ fn test_unet_forward_backward_update() -> Result<()> {
     // --- Forward pass ---
     let (pred, intermediates) = DenoisingModel::forward(&unet, &v)?;
     assert_eq!(pred.dims(), &[batch_size, img_dim]);
-    assert_eq!(intermediates.len(), 26);
+    assert_eq!(intermediates.len(), 21);
 
     let initial_w1 = unet.w1.copy()?;
 
     // --- Backward pass ---
     let grads = DenoisingModel::backward(&unet, &v, &intermediates, &pred, &target)?;
-    assert_eq!(grads.len(), 15);
+    assert_eq!(grads.len(), 13);
     assert_eq!(grads[0].dims(), &[img_dim, cond_dim]); // dw_cond
     assert_eq!(grads[1].dims(), &[img_dim]); // db_cond
     assert_eq!(grads[2].dims(), &[16, 2, 3, 3]); // dw1

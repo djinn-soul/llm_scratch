@@ -23,7 +23,8 @@
 //
 
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor};
+use candle_core::{Device, Tensor};
+use rand::RngExt;
 
 use llm_scratch_rs::common::Ema;
 use llm_scratch_rs::models::diffusion::sampling::{
@@ -148,10 +149,6 @@ fn save_fixed_noise_checkpoint(
     device: &Device,
 ) -> Result<()> {
     std::fs::create_dir_all("unet_checkpoints")?;
-    save_model_checkpoint(
-        model,
-        format!("unet_checkpoints/epoch_{epoch:04}.safetensors"),
-    )?;
     fixed_noise.save_safetensors("fixed_noise", "unet_checkpoints/fixed_noise.safetensors")?;
 
     // Deterministic DDIM preview, strided to ~20 reverse steps instead of the
@@ -163,7 +160,7 @@ fn save_fixed_noise_checkpoint(
         scheduler,
         fixed_noise.clone(),
         SAMPLING_START_TIMESTEP,
-        20,
+        10,
         img_dim,
         time_emb_dim,
         class_one_hot,
@@ -415,7 +412,7 @@ fn main() -> Result<()> {
     // missing path can no longer surface hours in.
     std::fs::create_dir_all("unet_checkpoints")?;
 
-    let num_epochs = 8000;
+    let num_epochs = 25000;
     println!(
         "Starting U-Net training for {} epochs (from epoch {})...",
         num_epochs, start_epoch
@@ -458,17 +455,18 @@ fn main() -> Result<()> {
     //   (b) Predict noise epsilon → more stable gradients across all t
     //   (c) Predict the score function → equivalent to (b) up to scaling
     //
+    let mut rng = rand::rng();
+
     // Noise prediction (b) gives the most uniform gradient magnitudes
     // across timesteps, leading to faster and more stable training.
     for epoch in start_epoch..=num_epochs {
         // --- Step 1: Sample a random minibatch of training images. ---
-        // Generate random indices in [0, total_samples) as floats, then cast
-        // to u32. This avoids needing a dedicated integer RNG.
-        let index_tensor =
-            Tensor::rand(0.0f32, total_samples as f32 - 1e-4, (batch_size,), &device)?
-                .to_dtype(DType::U32)?;
-
-        let indices = index_tensor.to_vec1::<u32>()?;
+        // Sample random indices on CPU directly, avoiding float-to-u32 casting
+        // and CPU-GPU synchronization roundtrips.
+        let indices: Vec<u32> = (0..batch_size)
+            .map(|_| rng.random_range(0..total_samples as u32))
+            .collect();
+        let index_tensor = Tensor::new(indices.as_slice(), &device)?;
         let x0 = images.index_select(&index_tensor, 0)?;
 
         // --- Step 2: Build class conditioning with CFG label dropout. ---
@@ -492,8 +490,10 @@ fn main() -> Result<()> {
         //   is the Monte Carlo estimator for this sum. Non-uniform strategies
         //   exist (e.g. importance sampling by loss magnitude) but uniform is the
         //   standard baseline and works well for MNIST.
-        let t_float = Tensor::rand(0.0f32, 100.0f32 - 1e-4, (batch_size,), &device)?;
-        let t_tensor = t_float.to_dtype(DType::U32)?;
+        let t_vec: Vec<u32> = (0..batch_size)
+            .map(|_| rng.random_range(0..100u32))
+            .collect();
+        let t_tensor = Tensor::new(t_vec.as_slice(), &device)?;
 
         // --- Step 4: Forward diffusion — corrupt x_0 to x_t. ---
         //
@@ -521,8 +521,7 @@ fn main() -> Result<()> {
         //   input_v = concat(x_t, time_embedding, class_one_hot)
         //   Shape: (batch, img_dim + time_emb_dim + num_classes)
         let t_emb = get_time_embedding(&t_tensor, time_emb_dim)?;
-        let cond = Tensor::cat(&[t_emb, label_one_hot], 1)?;
-        let input_v = Tensor::cat(&[xt, cond], 1)?;
+        let input_v = Tensor::cat(&[&xt, &t_emb, &label_one_hot], 1)?;
 
         // --- Step 6: Forward + backward pass. ---
         //
@@ -541,23 +540,46 @@ fn main() -> Result<()> {
         // through the network using the chain rule and the cached intermediates.
         let grads = model.backward(&input_v, &intermediates, &pred, &noise)?;
 
-        // --- Logging (every 10 epochs) ---
+        // --- Gradient Clipping (max_norm = 1.0) & Norm Computation ---
+        let max_norm = 1.0f32;
+        let is_log_epoch = epoch % 100 == 0 || epoch == 1;
+
+        // Compute squared norm of each parameter gradient on-device without blocking CPU sync.
+        let norm_sq_tensors: Vec<Tensor> = grads
+            .iter()
+            .map(|g| g.sqr()?.sum_all().map_err(Into::into))
+            .collect::<Result<Vec<Tensor>>>()?;
+        let stacked_norms = Tensor::stack(&norm_sq_tensors, 0)?;
+
+        let (global_norm, grad_norms) = if is_log_epoch {
+            let norms_sq_vec = stacked_norms.to_vec1::<f32>()?;
+            let total_norm_sq: f32 = norms_sq_vec.iter().sum();
+            let grad_norms: Vec<f32> = norms_sq_vec.into_iter().map(|n| n.sqrt()).collect();
+            (total_norm_sq.sqrt(), grad_norms)
+        } else {
+            let total_norm_sq = stacked_norms.sum_all()?.to_scalar::<f32>()?;
+            (total_norm_sq.sqrt(), Vec::new())
+        };
+        let grads = if global_norm > max_norm {
+            let scale = (max_norm / (global_norm + 1e-6)) as f64;
+            grads
+                .iter()
+                .map(|g| g.affine(scale, 0.0).map_err(Into::into))
+                .collect::<Result<Vec<Tensor>>>()?
+        } else {
+            grads
+        };
+
+        // --- Logging (every 100 epochs) ---
         // Print MSE loss and per-parameter gradient L2 norms for monitoring.
-        // Gradient norms should be non-zero (learning is happening) and not
-        // exploding (stability). If a gradient norm is zero, the corresponding
-        // parameter is not being updated — a sign of vanishing gradients.
-        if epoch % 10 == 0 || epoch == 1 {
+        if is_log_epoch {
             let elapsed = start_time.elapsed().as_secs_f64();
             let loss = pred.sub(&noise)?.sqr()?.mean_all()?.to_scalar::<f32>()?;
             let param_names = model.param_names();
-            let grad_norms: Vec<f32> = grads
-                .iter()
-                .map(|g| -> Result<f32> { Ok(g.sqr()?.sum_all()?.to_scalar::<f32>()?.sqrt()) })
-                .collect::<Result<Vec<_>>>()?;
             let norms_str: Vec<String> = param_names
                 .iter()
                 .zip(grad_norms.iter())
-                .map(|(name, norm)| format!("{} norm: {:.4}", name, norm))
+                .map(|(name, norm)| format!("{} norm(pre-clip): {:.4}", name, norm))
                 .collect();
             println!(
                 "Epoch {:>5}/{} | Loss: {:.6} | Elapsed: {:.2}s | Speed: {:.1} epochs/s | {}",
@@ -570,7 +592,20 @@ fn main() -> Result<()> {
             );
         }
 
-        // --- Step 7: Adam optimizer update. ---
+        // --- Learning Rate Schedule: Linear Warmup (500 epochs) + Cosine Decay ---
+        let base_lr = 1e-4f64;
+        let min_lr = 1e-6f64;
+        let warmup_epochs = 500.0f64;
+        let total_epochs_f = num_epochs as f64;
+
+        let current_lr = if (epoch as f64) < warmup_epochs {
+            base_lr * (epoch as f64 / warmup_epochs)
+        } else {
+            let progress = (epoch as f64 - warmup_epochs) / (total_epochs_f - warmup_epochs);
+            min_lr + 0.5 * (base_lr - min_lr) * (1.0 + (std::f64::consts::PI * progress).cos())
+        };
+        optimizer.lr = current_lr;
+        // --- Step 7: Adam optimizer update (uses LR set above). ---
         optimizer.step(&model, &grads)?;
         // 2. Update EMA shadow weights with the new model weights
         ema.update(&model)?;
@@ -600,7 +635,7 @@ fn main() -> Result<()> {
                 &scheduler,
                 checkpoint_noise.clone(),
                 SAMPLING_START_TIMESTEP,
-                20, // 20 strided DDIM steps
+                10, // 10 strided DDIM steps
                 img_dim,
                 time_emb_dim,
                 &class_one_hot,

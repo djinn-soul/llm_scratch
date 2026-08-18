@@ -124,10 +124,11 @@ pub fn sample_ddpm_from_noise(
             alphas_cumprod.as_slice(),
             sigmas.as_slice(),
             device,
-        )?;
+        )?
+        .detach();
     }
 
-    Ok(xt)
+    Ok(xt.detach())
 }
 
 fn ddpm_reverse_step(
@@ -366,6 +367,9 @@ pub fn sample_ddpm_cond(
         // The model's estimate of the added noise, conditioned on timestep t
         // and class label c (embedded as the one-hot vector).
         let (pred_noise, _intermediates) = model.forward(&v)?;
+        // Detach the prediction so the UNet's internal computation graph
+        // (26 cached intermediate tensors) can be freed immediately.
+        let pred_noise = pred_noise.detach();
 
         // --- Step 5: Retrieve schedule coefficients for this step -----------
         let beta = betas[t_step];
@@ -387,17 +391,18 @@ pub fn sample_ddpm_cond(
         // --- Step 8: Stochastic sampling (all steps except the last) --------
         // Add sigma_t * z to preserve the Gaussian variance of the reverse posterior.
         // At t=0 we output the deterministic mean — no further noise is needed.
+        // Detach xt so the next iteration does not pin this step's graph.
         if t_step > 0 {
             let z = Tensor::randn(0.0f32, 1.0f32, (num_samples, img_dim), device)?;
             // x_{t-1} = mean + sigma_t * z
-            xt = mean.add(&z.affine(sigma as f64, 0.0)?)?;
+            xt = mean.add(&z.affine(sigma as f64, 0.0)?)?.detach();
         } else {
             // Final reverse step: x_0 = mean (deterministic)
-            xt = mean;
+            xt = mean.detach();
         }
     }
 
-    Ok(xt)
+    Ok(xt.detach())
 }
 
 // =============================================================================
@@ -623,43 +628,71 @@ where
         // Step 2: Sinusoidal time embedding — must match the one used at training.
         let time_emb = get_time_embedding(&t_tensor, time_emb_dim)?;
 
-        // Step 3: Build BOTH the conditional and unconditional model inputs.
+        // Step 3: Construct model inputs and run the CFG forward pass.
         //
-        // v_cond:  concat(x_t, time_emb, class_one_hot)  — the "guided" input
-        // v_null:  concat(x_t, time_emb, null_one_hot)   — the "free" input
+        // Classifier-Free Guidance needs TWO noise predictions per step:
+        //   v_cond = concat(x_t, time_emb, class_one_hot)  — guided input
+        //   v_null = concat(x_t, time_emb, null_one_hot)   — unconditional input
         //
         // WHY send x_t and time_emb to both?
         //   The only difference between the two predictions should be the label.
         //   Keeping x_t and time_emb identical ensures the class slot is the
         //   sole source of difference, making the guidance direction clean.
-        let v_cond = Tensor::cat(&[&xt, &time_emb, class_one_hot], 1)?;
-        let v_null = Tensor::cat(&[&xt, &time_emb, &null_one_hot], 1)?;
-
-        // Step 4: One batched forward pass for both predictions.
         //
-        // We need epsilon_cond and epsilon_uncond separately to compute the
-        // guidance direction. Rather than evaluate the model twice, stack the
-        // conditional and unconditional inputs along the batch dim and run a
-        // single forward — forward is batch-agnostic, so this halves the
-        // per-step model evaluations (the dominant sampling cost).
+        // The CFG blending formula (Step 5) is:
+        //   eps_guided = eps_uncond + s * (eps_cond - eps_uncond)
         //
-        // Note: intermediate activations are discarded — we're at inference.
-        let v_batched = Tensor::cat(&[&v_cond, &v_null], 0)?;
-        let (pred_batched, _) = model.forward(&v_batched)?;
-        let pred_cond = pred_batched.narrow(0, 0, num_samples)?;
-        let pred_uncond = pred_batched.narrow(0, num_samples, num_samples)?;
-
-        // Step 5: Compute the CFG-modified noise prediction.
+        // Expanding algebraically:
+        //   eps_guided = (1 - s) * eps_uncond + s * eps_cond
         //
-        // Standard CFG formula:
-        //   epsilon_guided = epsilon_uncond + s * (epsilon_cond - epsilon_uncond)
+        // KEY BOUNDARY VALUES tell us when we can skip work:
+        //   s = 1.0 → eps_guided = eps_cond       (unconditional cancels out)
+        //   s = 0.0 → eps_guided = eps_uncond      (conditional cancels out)
+        //   s ≠ 0,1 → both predictions are needed
         //
-        // Expanded:
-        //   epsilon_guided = s * epsilon_cond + (1 - s) * epsilon_uncond
+        // MEMORY OPTIMIZATION:
+        //   We skip the redundant pass when s=1.0 or s=0.0, and run both
+        //   passes sequentially (not batch-stacked) otherwise so peak memory
+        //   stays at batch-size N rather than 2N.
         //
-        // s=0 is unconditional, s=1 is ordinary conditional prediction, and
-        // s>1 extrapolates toward stronger class conditioning.
-        let pred_noise = combine_cfg_predictions(&pred_cond, &pred_uncond, guidance_scale)?;
+        // GRAPH DETACH:
+        //   Every path detaches the result so the UNet's internal computation
+        //   graph (conv activations, attention matrices, group norm — 26 cached
+        //   tensors per forward pass) can be freed before the next iteration.
+        let pred_noise = if (guidance_scale - 1.0).abs() < 1e-6 {
+            // Step 4a: guidance_scale == 1.0 — pure conditional prediction.
+            //
+            // WHY skip the unconditional pass?
+            //   At s=1.0 the CFG formula reduces to:
+            //     eps_guided = eps_uncond + 1.0 * (eps_cond - eps_uncond)
+            //                = eps_cond
+            //   The unconditional prediction cancels out algebraically.
+            let v_cond = Tensor::cat(&[&xt, &time_emb, class_one_hot], 1)?;
+            let (pred_cond, _) = model.forward(&v_cond)?;
+            pred_cond.detach()
+        } else if guidance_scale.abs() < 1e-6 {
+            // Step 4b: guidance_scale == 0.0 — pure unconditional prediction.
+            //
+            // WHY skip the conditional pass?
+            //   At s=0.0 the CFG formula reduces to eps_guided = eps_uncond.
+            //   The conditional prediction has zero weight.
+            let v_null = Tensor::cat(&[&xt, &time_emb, &null_one_hot], 1)?;
+            let (pred_uncond, _) = model.forward(&v_null)?;
+            pred_uncond.detach()
+        } else {
+            // Step 4c: General CFG (s ≠ 0 and s ≠ 1).
+            //
+            // Both predictions are needed. Run SEQUENTIALLY so peak memory
+            // stays at batch-size N, not 2N.
+            //
+            // Step 5: Combine via CFG formula:
+            //   eps_guided = eps_uncond + s * (eps_cond - eps_uncond)
+            let v_cond = Tensor::cat(&[&xt, &time_emb, class_one_hot], 1)?;
+            let (pred_cond, _) = model.forward(&v_cond)?;
+            let v_null = Tensor::cat(&[&xt, &time_emb, &null_one_hot], 1)?;
+            let (pred_uncond, _) = model.forward(&v_null)?;
+            combine_cfg_predictions(&pred_cond, &pred_uncond, guidance_scale)?.detach()
+        };
 
         // Step 6: Derive respaced schedule coefficients for this jump.
         //
@@ -721,14 +754,16 @@ where
         //   last entry alpha_bar_prev = 1.0, so sigma is exactly 0 and no
         //   noise would be added regardless — the branch just skips the
         //   wasted randn call.
+        //
+        // Detach xt so the next iteration does not pin this step's graph.
         if frame_idx + 1 < timesteps.len() {
             // z ~ N(0, I): independent noise for this reverse step.
             let z = Tensor::randn(0.0f32, 1.0f32, (num_samples, img_dim), device)?;
             // x_{t-1} = mean + sigma_t * z
-            xt = mean.add(&z.affine(sigma as f64, 0.0)?)?;
+            xt = mean.add(&z.affine(sigma as f64, 0.0)?)?.detach();
         } else {
             // Final step: output the deterministic mean as x_0.
-            xt = mean;
+            xt = mean.detach();
         }
 
         on_step(frame_idx, &xt)?;
@@ -1076,24 +1111,89 @@ where
         // Step 2: Sinusoidal time embedding (must match training).
         let time_emb = get_time_embedding(&t_tensor, time_emb_dim)?;
 
-        // Step 3: Construct conditional and unconditional model inputs.
-        //   v_cond = concat(x_t, time_emb, class_one_hot)  — guided
-        //   v_null = concat(x_t, time_emb, null_one_hot)   — unconditional
-        let v_cond = Tensor::cat(&[&xt, &time_emb, class_one_hot], 1)?;
-        let v_null = Tensor::cat(&[&xt, &time_emb, &null_one_hot], 1)?;
-
-        // Step 4: Batched CFG forward pass.
-        // Stack conditional + unconditional inputs along batch dim and run the
-        // model once. This halves per-step evaluations (the dominant cost).
-        // Split the result back into conditional and unconditional predictions.
-        let v_batched = Tensor::cat(&[&v_cond, &v_null], 0)?;
-        let (pred_batched, _) = model.forward(&v_batched)?;
-        let pred_cond = pred_batched.narrow(0, 0, num_samples)?;
-        let pred_uncond = pred_batched.narrow(0, num_samples, num_samples)?;
-
-        // Step 5: Combine via CFG formula:
+        // Step 3: Construct model inputs and run the CFG forward pass.
+        //
+        // Classifier-Free Guidance needs TWO noise predictions per step:
+        //   v_cond = concat(x_t, time_emb, class_one_hot)  — guided input
+        //   v_null = concat(x_t, time_emb, null_one_hot)   — unconditional input
+        //
+        // The CFG blending formula (Step 5) is:
         //   eps_guided = eps_uncond + s * (eps_cond - eps_uncond)
-        let pred_noise = combine_cfg_predictions(&pred_cond, &pred_uncond, guidance_scale)?;
+        //
+        // Expanding algebraically:
+        //   eps_guided = (1 - s) * eps_uncond + s * eps_cond
+        //
+        // KEY BOUNDARY VALUES tell us when we can skip work:
+        //   s = 1.0 → eps_guided = eps_cond       (unconditional cancels out)
+        //   s = 0.0 → eps_guided = eps_uncond      (conditional cancels out)
+        //   s ≠ 0,1 → both predictions are needed
+        //
+        // MEMORY OPTIMIZATION:
+        //   The original code batch-stacked v_cond and v_null along dim 0,
+        //   doubling the effective batch size from N to 2N through every UNet
+        //   layer (convolutions, attention, group norm). This doubles peak
+        //   activation memory. Instead we:
+        //     (a) Skip the redundant pass entirely when s=1.0 or s=0.0.
+        //     (b) Run both passes sequentially when s≠0,1 — peak memory
+        //         stays at batch-size N, not 2N.
+        //
+        // GRAPH DETACH:
+        //   Every path detaches the result. Without this, the predicted noise
+        //   tensor retains references to the UNet's internal computation graph
+        //   (conv activations, attention matrices, group norm intermediates —
+        //   26 cached tensors per forward pass). Detaching lets those be freed
+        //   before the next iteration begins.
+        let pred_noise = if (guidance_scale - 1.0).abs() < 1e-6 {
+            // Step 4a: guidance_scale == 1.0 — pure conditional prediction.
+            //
+            // WHY skip the unconditional pass?
+            //   At s=1.0 the CFG formula reduces to:
+            //     eps_guided = eps_uncond + 1.0 * (eps_cond - eps_uncond)
+            //                = eps_cond
+            //   The unconditional prediction cancels out algebraically, so
+            //   computing it wastes one full UNet forward pass and doubles
+            //   peak memory for no effect on the output.
+            //
+            //   This is the common case during checkpoint previews (both
+            //   online and EMA grids use s=1.0), so the saving is frequent.
+            let v_cond = Tensor::cat(&[&xt, &time_emb, class_one_hot], 1)?;
+            let (pred_cond, _) = model.forward(&v_cond)?;
+            pred_cond.detach()
+        } else if guidance_scale.abs() < 1e-6 {
+            // Step 4b: guidance_scale == 0.0 — pure unconditional prediction.
+            //
+            // WHY skip the conditional pass?
+            //   At s=0.0 the CFG formula reduces to:
+            //     eps_guided = eps_uncond + 0.0 * (eps_cond - eps_uncond)
+            //                = eps_uncond
+            //   The conditional prediction has zero weight, so computing it
+            //   is wasted work.
+            let v_null = Tensor::cat(&[&xt, &time_emb, &null_one_hot], 1)?;
+            let (pred_uncond, _) = model.forward(&v_null)?;
+            pred_uncond.detach()
+        } else {
+            // Step 4c: General CFG (s ≠ 0 and s ≠ 1).
+            //
+            // Both conditional and unconditional predictions are needed.
+            // We run them SEQUENTIALLY rather than batch-stacking so the
+            // UNet's peak activation memory stays at batch-size N, not 2N.
+            //
+            // WHY sequential instead of batched?
+            //   Batch-stacking (Tensor::cat along dim 0) creates a single
+            //   2N-sized tensor that flows through every conv/attention/norm
+            //   layer, doubling the memory footprint of every intermediate
+            //   activation. Sequential passes process N samples at a time,
+            //   and the first pass's intermediates (discarded by `_`) can be
+            //   freed before the second pass allocates its own.
+            //
+            // Step 5: Combine via CFG formula:
+            //   eps_guided = eps_uncond + s * (eps_cond - eps_uncond)
+            let v_cond = Tensor::cat(&[&xt, &time_emb, class_one_hot], 1)?;
+            let (pred_cond, _) = model.forward(&v_cond)?;
+            let v_null = Tensor::cat(&[&xt, &time_emb, &null_one_hot], 1)?;
+            let (pred_uncond, _) = model.forward(&v_null)?;
+            combine_cfg_predictions(&pred_cond, &pred_uncond, guidance_scale)?.detach()
+        };
 
         // Step 6: Retrieve alpha_bar values for the DDIM update.
         //
@@ -1159,7 +1259,12 @@ where
         //   - the x0_hat coefficient becomes 1.0 (we just output x0_hat)
         //   - the direction coefficient becomes 0.0 (no noise re-injection)
         //   → the output is exactly the clamped x0 prediction.
-        xt = pred_x0.affine(alpha_bar_prev_val.sqrt(), 0.0)?.add(&dir)?;
+        // Detach xt itself so the next iteration's forward pass does not
+        // pin this step's entire computation graph in memory.
+        xt = pred_x0
+            .affine(alpha_bar_prev_val.sqrt(), 0.0)?
+            .add(&dir)?
+            .detach();
         on_step(frame_idx, &xt)?;
     }
 
@@ -1229,4 +1334,233 @@ pub fn sample_ddim_cfg_from_timestep(
         device,
         |_, _| Ok(()),
     )
+}
+
+/// Computes half log-SNR: λ = 0.5 * ln(α_bar / (1 - α_bar))
+#[inline]
+fn compute_half_log_snr(alpha_bar: f64) -> f64 {
+    // Clamp slightly inside (0, 1) to prevent ln(0) or division by zero at boundary
+    let alpha_bar = alpha_bar.clamp(1e-7, 1.0 - 1e-7);
+    0.5 * (alpha_bar / (1.0 - alpha_bar)).ln()
+}
+
+// Computes x̂_0 = (x_t - σ_t * ε_θ) / α_t, clamped to [-1.0, 1.0]
+fn predict_x0(xt: &Tensor, pred_noise: &Tensor, alpha_bar: f64) -> Result<Tensor> {
+    let alpha_t = alpha_bar.sqrt();
+    let sigma_t = (1.0 - alpha_bar).sqrt();
+    // x̂_0 = (x_t - sigma_t * pred_noise) / alpha_t
+    let pred_x0 = xt
+        .sub(&pred_noise.affine(sigma_t, 0.0)?)?
+        .affine(1.0 / alpha_t, 0.0)?
+        .clamp(-1.0, 1.0)?;
+    Ok(pred_x0)
+}
+
+pub fn sample_dpm_solver_2m_cfg_strided_with_callback<F>(
+    model: &dyn DenoisingModel,
+    scheduler: &BetaScheduler,
+    mut xt: Tensor,
+    start_timestep: usize,
+    num_inference_steps: usize,
+    _img_dim: usize,
+    time_emb_dim: usize,
+    class_one_hot: &Tensor,
+    guidance_scale: f64,
+    device: &Device,
+    mut on_step: F,
+) -> Result<Tensor>
+where
+    F: FnMut(usize, &Tensor) -> Result<()>,
+{
+    let num_samples = xt.dim(0)?;
+    let alphas_cumprod = scheduler.alphas_cumprod.to_vec1::<f32>().unwrap();
+    let null_one_hot = Tensor::zeros(class_one_hot.dims(), class_one_hot.dtype(), device)?;
+
+    let timesteps = strided_timesteps(start_timestep, num_inference_steps);
+    let total_steps = timesteps.len();
+
+    let mut prev_x0_hat: Option<Tensor> = None;
+
+    let mut prev_h: Option<f64> = None;
+
+    for (steps_idx, &t_curr) in timesteps.iter().enumerate() {
+        let t_tensor = Tensor::new(&vec![t_curr as f32; num_samples][..], device)?;
+        let time_emb = get_time_embedding(&t_tensor, time_emb_dim)?;
+
+        let pred_noise = if (guidance_scale - 1.0).abs() < 1e-6 {
+            let v_cond = Tensor::cat(&[&xt, &time_emb, class_one_hot], 1)?;
+            let (p, _) = model.forward(&v_cond)?;
+            p.detach()
+        } else {
+            let v_cond = Tensor::cat(&[&xt, &time_emb, class_one_hot], 1)?;
+            let v_null = Tensor::cat(&[&xt, &time_emb, &null_one_hot], 1)?;
+
+            let (p_cond, _) = model.forward(&v_cond)?;
+            let (p_null, _) = model.forward(&v_null)?;
+            combine_cfg_predictions(&p_cond, &p_null, guidance_scale)?.detach()
+        };
+
+        let alpha_bar_curr = alphas_cumprod[t_curr] as f64;
+        let x0_hat_curr = predict_x0(&xt, &pred_noise, alpha_bar_curr)?;
+
+        if steps_idx + 1 == total_steps {
+            xt = x0_hat_curr.detach();
+            on_step(steps_idx, &xt)?;
+            break;
+        }
+
+        // --- C. Extract target timestep (t_next) coefficients ---
+        let t_next = timesteps[steps_idx + 1];
+        let alpha_bar_next = alphas_cumprod[t_next] as f64;
+
+        let _alpha_curr = alpha_bar_curr.sqrt();
+        let sigma_curr = (1.0 - alpha_bar_curr).sqrt();
+        let lambda_curr = compute_half_log_snr(alpha_bar_curr);
+        let alpha_next = alpha_bar_next.sqrt();
+        let sigma_next = (1.0 - alpha_bar_next).sqrt();
+        let lambda_next = compute_half_log_snr(alpha_bar_next);
+        // h = λ_next - λ_curr (always positive as λ increases towards clean data)
+        let h = lambda_next - lambda_curr;
+
+        // --- D. DPM-Solver++ Update: 1st-order (step 0) vs 2nd-order (step >= 1) ---
+        let phi_1 = (-h).exp() - 1.0;
+        let next_xt = match (prev_x0_hat.as_ref(), prev_h) {
+            (Some(x0_prev), Some(h_prev)) => {
+                // 2nd order
+                let r = h_prev / h;
+                //d1 = x0 hat - x0 prev /r
+                let d1 = x0_hat_curr.sub(x0_prev)?.affine(1.0 / r, 0.0)?;
+                let phi_2 = ((-h).exp() - 1.0 + h) / h;
+
+                let term1 = xt.affine(sigma_next / sigma_curr, 0.0)?;
+
+                let term2 = x0_hat_curr.affine(-alpha_next * phi_1, 0.0)?;
+
+                let term3 = d1.affine(-alpha_next * phi_2, 0.0)?;
+                term1.add(&term2)?.add(&term3)?
+            }
+
+            _ => {
+                // 1st order
+                let term1 = xt.affine(sigma_next / sigma_curr, 0.0)?;
+                let term2 = x0_hat_curr.affine(-alpha_next * phi_1, 0.0)?;
+                term1.add(&term2)?
+            }
+        };
+
+        prev_x0_hat = Some(x0_hat_curr);
+        prev_h = Some(h);
+
+        xt = next_xt.detach();
+        on_step(steps_idx, &xt)?;
+    }
+    Ok(xt)
+}
+
+/// Identifies supported diffusion reverse-sampling algorithms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SamplerKind {
+    /// 2nd-order exponential multistep ODE solver (8–10 steps recommended).
+    DpmSolver2m,
+    /// 1st-order deterministic ODE solver (20–50 steps recommended).
+    Ddim,
+    /// 1st-order stochastic Markovian SDE solver (100 steps recommended).
+    Ddpm,
+}
+
+impl std::fmt::Display for SamplerKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DpmSolver2m => write!(f, "dpm-solver++(2m)"),
+            Self::Ddim => write!(f, "ddim"),
+            Self::Ddpm => write!(f, "ddpm"),
+        }
+    }
+}
+
+impl std::str::FromStr for SamplerKind {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().trim() {
+            "dpm" | "dpmsolver" | "dpm2m" | "dpm_solver_2m" | "dpm-solver++" => {
+                Ok(SamplerKind::DpmSolver2m)
+            }
+            "ddim" => Ok(SamplerKind::Ddim),
+            "ddpm" => Ok(SamplerKind::Ddpm),
+            _ => bail!("unknown sampler '{}'. Supported: dpm, ddim, ddpm", s),
+        }
+    }
+}
+
+impl SamplerKind {
+    /// Suggested default inference step count for this sampler on MNIST.
+    pub fn default_inference_steps(&self) -> usize {
+        match self {
+            Self::DpmSolver2m => 8,
+            Self::Ddim => 20,
+            Self::Ddpm => 100,
+        }
+    }
+}
+
+/// Unified plug-and-play dispatch function for any supported diffusion sampler.
+pub fn sample_diffusion_cfg<F>(
+    sampler: SamplerKind,
+    model: &dyn DenoisingModel,
+    scheduler: &BetaScheduler,
+    xt: Tensor,
+    start_timestep: usize,
+    num_inference_steps: usize,
+    img_dim: usize,
+    time_emb_dim: usize,
+    class_one_hot: &Tensor,
+    guidance_scale: f64,
+    device: &Device,
+    on_step: F,
+) -> Result<Tensor>
+where
+    F: FnMut(usize, &Tensor) -> Result<()>,
+{
+    match sampler {
+        SamplerKind::DpmSolver2m => sample_dpm_solver_2m_cfg_strided_with_callback(
+            model,
+            scheduler,
+            xt,
+            start_timestep,
+            num_inference_steps,
+            img_dim,
+            time_emb_dim,
+            class_one_hot,
+            guidance_scale,
+            device,
+            on_step,
+        ),
+        SamplerKind::Ddim => sample_ddim_cfg_strided_with_call_back(
+            model,
+            scheduler,
+            xt,
+            start_timestep,
+            num_inference_steps,
+            img_dim,
+            time_emb_dim,
+            class_one_hot,
+            guidance_scale,
+            device,
+            on_step,
+        ),
+        SamplerKind::Ddpm => sample_ddpm_cfg_strided_with_callback(
+            model,
+            scheduler,
+            xt,
+            start_timestep,
+            num_inference_steps,
+            img_dim,
+            time_emb_dim,
+            class_one_hot,
+            guidance_scale,
+            device,
+            on_step,
+        ),
+    }
 }

@@ -3,16 +3,18 @@
 //
 // Attention output is O[:, i] = sum_j A[i, j] * V[:, j]. If the softmax rows A
 // are near-uniform, every output position becomes the same global mean of V and
-// all spatial detail at the bottleneck is destroyed. Because the UNet applies
-// attention WITHOUT a residual (a3 = attn(a3_pre)), that collapse is not merely
-// a no-op — it erases a3_pre from the decoder path entirely.
+// all spatial detail at the bottleneck is destroyed. The UNet applies attention
+// as a residual (a3 = (a3_pre + attn(a3_pre)) * RESIDUAL_SCALE), so near-uniform
+// attention is tolerable — the skip carries spatial signal while attention
+// gradually learns what to add. This test verifies that the residual path keeps
+// spatial variance alive.
 //
 // Reported per run:
 //   - mean softmax entropy vs the uniform maximum log(n)
 //   - spatial variance of the attention input vs its output
 //
 // Entropy at ~100% of max, or an output/input spatial-variance ratio near zero,
-// both indicate collapse.
+// both indicate collapse (which the residual should prevent).
 
 use anyhow::Result;
 use candle_core::{Device, Tensor};
@@ -79,12 +81,21 @@ fn bottleneck_attention_preserves_spatial_structure() -> Result<()> {
     let input = Tensor::randn(0.0f32, 1.0f32, (2, IMG_DIM + COND_DIM), &device)?;
     let (_pred, intermediates) = model.forward(&input)?;
 
-    // Layout from SimpleDenoisingUNet::forward: 20 UNet intermediates, then the
-    // attention cache [x_seq, q, k, v, scores, attn_weights].
-    let a3 = &intermediates[13];
-    let x_seq = &intermediates[20];
-    let scores = &intermediates[24];
-    let attn_weights = &intermediates[25];
+    // Layout from SimpleDenoisingUNet::forward: 16 UNet intermediates, then the
+    // attention cache [x_seq, q, k, v, attn_weights] (scores no longer cached).
+    let a3 = &intermediates[10];
+    let x_seq = &intermediates[16];
+    let q = &intermediates[17];
+    let k = &intermediates[18];
+    let attn_weights = &intermediates[20];
+
+    // Recompute raw attention scores from cached Q, K for diagnostics.
+    let c = q.dim(1)?;
+    let scale = 1.0 / (c as f64).sqrt();
+    let scores = q
+        .transpose(1, 2)?
+        .broadcast_matmul(k)?
+        .affine(scale, 0.0)?;
 
     let (b, c, h, w) = a3.dims4()?;
     let a3_seq = a3.reshape((b, c, h * w))?;

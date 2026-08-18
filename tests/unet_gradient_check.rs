@@ -9,13 +9,15 @@
 // specifically:
 //   - w_cond / w2 / w3 sit UPSTREAM of the residual, so their gradients flow
 //     through the combined (attention + skip) path.
-//   - attn_w_q / attn_w_v sit inside the attention branch.
+//   - attn_w_qkv covers the fused Q/K/V projection inside the attention branch.
 // An error in either half of the residual split shows up here.
 
 use anyhow::Result;
 use candle_core::{Device, Tensor};
 use llm_scratch_rs::common::parameterized::Parameterized;
-use llm_scratch_rs::models::diffusion::{DenoisingModel, SimpleDenoisingUNet};
+use llm_scratch_rs::models::diffusion::{
+    DenoisingModel, SimpleDenoisingUNet, SimpleDenoisingUNetAdaGN,
+};
 
 const IMG_DIM: usize = 16; // 4x4 image -> h_down = 2, attention length n = 4
 const COND_DIM: usize = 6;
@@ -85,8 +87,8 @@ fn unet_backward_matches_finite_difference_through_attention_residual() -> Resul
         ("w_cond", 0usize),
         ("w2", 5),
         ("w3", 11),
-        ("attn_w_q", 3),
-        ("attn_w_v", 7),
+        ("attn_w_qkv", 3),  // Q region of fused weight
+        ("attn_w_qkv", 7),  // still in Q/K/V region
     ];
 
     let eps = 2e-3f32;
@@ -110,3 +112,86 @@ fn unet_backward_matches_finite_difference_through_attention_residual() -> Resul
 
     Ok(())
 }
+
+fn loss_of_adagn(unet: &SimpleDenoisingUNetAdaGN, v: &Tensor, target: &Tensor) -> Result<f64> {
+    let (pred, _) = DenoisingModel::forward(unet, v)?;
+    let (b, d) = pred.dims2()?;
+    let sq = pred.sub(target)?.sqr()?.sum_all()?.to_scalar::<f32>()? as f64;
+    Ok(sq / (b * d) as f64)
+}
+
+fn numeric_grad_adagn(
+    unet: &SimpleDenoisingUNetAdaGN,
+    name: &str,
+    idx: usize,
+    v: &Tensor,
+    target: &Tensor,
+    device: &Device,
+    eps: f32,
+) -> Result<f64> {
+    let original = unet.get(name)?;
+    let dims = original.dims().to_vec();
+    let mut values = original.flatten_all()?.to_vec1::<f32>()?;
+    let saved = values[idx];
+
+    values[idx] = saved + eps;
+    unet.set_param(
+        name,
+        &Tensor::from_vec(values.clone(), dims.clone(), device)?,
+    )?;
+    let plus = loss_of_adagn(unet, v, target)?;
+
+    values[idx] = saved - eps;
+    unet.set_param(
+        name,
+        &Tensor::from_vec(values.clone(), dims.clone(), device)?,
+    )?;
+    let minus = loss_of_adagn(unet, v, target)?;
+
+    values[idx] = saved;
+    unet.set_param(name, &Tensor::from_vec(values, dims, device)?)?;
+
+    Ok((plus - minus) / (2.0 * eps as f64))
+}
+
+#[test]
+fn unet_adagn_backward_matches_finite_difference() -> Result<()> {
+    let device = &Device::Cpu;
+    let unet = SimpleDenoisingUNetAdaGN::new(IMG_DIM, COND_DIM, device)?;
+
+    let v = Tensor::randn(0.0f32, 1.0f32, (BATCH, IMG_DIM + COND_DIM), device)?;
+    let target = Tensor::randn(0.0f32, 1.0f32, (BATCH, IMG_DIM), device)?;
+
+    let (pred, intermediates) = DenoisingModel::forward(&unet, &v)?;
+    let grads = DenoisingModel::backward(&unet, &v, &intermediates, &pred, &target)?;
+
+    let names = unet.param_names();
+
+    let checks = [
+        ("w1", 0usize),
+        ("w2", 5),
+        ("w3", 11),
+        ("w_ada1", 2),
+        ("w_ada2", 4),
+        ("attn_w_qkv", 3),
+    ];
+
+    let eps = 2e-3f32;
+    for (name, idx) in checks {
+        let grad_idx = names
+            .iter()
+            .position(|n| *n == name)
+            .unwrap_or_else(|| panic!("unknown parameter {name}"));
+        let analytic = grads[grad_idx].flatten_all()?.to_vec1::<f32>()?[idx] as f64;
+        let numeric = numeric_grad_adagn(&unet, name, idx, &v, &target, device, eps)?;
+
+        let tolerance = 5e-2 * analytic.abs().max(numeric.abs()) + 2e-4;
+        assert!(
+            (analytic - numeric).abs() <= tolerance,
+            "{name}[{idx}]: analytic={analytic:.8}, numeric={numeric:.8}, tol={tolerance:.8}"
+        );
+    }
+
+    Ok(())
+}
+

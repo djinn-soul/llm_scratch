@@ -20,6 +20,7 @@ remain understandable without needing to remember chapter numbers.
 - [SentencePiece](#sentencepiece---unigram-language-model)
 - [BPE vs Unigram](#bpe-vs-unigram)
 - [Current Model Stack](#current-model-stack)
+- [Diffusion Samplers & Resampling CLI](#diffusion-samplers--resampling-cli)
 - [Roadmap](#roadmap)
 - [TODO](#todo)
 - [Next Step](#next-step)
@@ -182,6 +183,52 @@ The current transformer demo checks that one block preserves shape:
 [seq_len][d_model] -> [seq_len][d_model]
 ```
 
+## Diffusion Samplers & Resampling CLI
+
+The codebase supports plug-and-play reverse diffusion inference on trained U-Net checkpoints (`ema_epoch_25000.safetensors`) with zero retraining:
+
+| Sampler | Order | Default Steps | Pass / NFE | Key Mechanism | Best For |
+| :--- | :---: | :---: | :---: | :--- | :--- |
+| **DPM-Solver++ (2M)** | **2nd-Order ODE** | **8–10 steps** | **$1\times$ NFE** | **Exact exponential integration** in log-SNR ($\lambda$) space + multistep $\hat{x}_0$ polynomial extrapolation | **Fastest inference & sharpest details** |
+| **DDIM** | 1st-Order ODE | 20–50 steps | $1\times$ NFE | Deterministic Euler jumps with $\hat{x}_0$ recovery | Balanced baseline |
+| **DDPM** | 1st-Order SDE | 100 steps | $1\times$ NFE | Stochastic reverse Markov transitions with per-step noise | Training validation & ground-truth |
+
+### Plug-and-Play Resampling CLI
+
+Run the modular resampler with customized samplers, steps, or side-by-side benchmark comparison:
+
+```bash
+# 1. Default ultra-fast DPM-Solver++ (8 steps)
+cargo run --release --bin resample_diffusion_unet
+
+# 2. Explicit DPM-Solver++ (10 steps, Guidance = 3.0, Class = 7)
+cargo run --release --bin resample_diffusion_unet -- --sampler dpm --steps 10 --guidance 3.0 --class 7
+
+# 3. Standard DDIM (20 steps)
+cargo run --release --bin resample_diffusion_unet -- --sampler ddim --steps 20
+
+# 4. Stochastic DDPM (100 steps)
+cargo run --release --bin resample_diffusion_unet -- --sampler ddpm --steps 100
+
+# 5. Comparative Benchmark (Runs DDPM, DDIM, and DPM-Solver++ and generates a 3-row comparison grid)
+cargo run --release --bin resample_diffusion_unet -- --sampler all
+```
+
+### Diffusion Architectures: Standard vs. AdaGN U-Net
+
+The repository implements two high-performance U-Net architectures:
+
+1. **`SimpleDenoisingUNet` (Spatial Concatenation):**
+   * Projects conditioning vector $c = [t_{\text{emb}}, \text{class}]$ into a $28\times 28$ spatial feature map.
+   * Concatenates with the input image (`[B, 2, 28, 28]`).
+   * Conv1 takes 2 channels: `w1: [16, 2, 3, 3]`.
+2. **`SimpleDenoisingUNetAdaGN` (Adaptive Group Normalization):**
+   * **Direct 1-Channel Input:** `w1: [16, 1, 3, 3]` takes raw grayscale image directly without spatial broadcasting.
+   * **Per-Layer Adaptive Modulation:** Injects conditioning dynamically into every GroupNorm layer via learned scale $\gamma(c)$ and shift $\beta(c)$:
+     $$\text{AdaGN}(x, c) = \text{GroupNorm}(x) \odot (1 + \gamma(c)) + \beta(c)$$
+   * **Zero-Initialized Identity Start:** Projection weights initialize at $0$ so the network starts training at pure standard GroupNorm without gradient explosion.
+   * **Analytical Backpropagation:** Hand-written analytical gradients verified against central-difference numerical differentiation (`tests/unet_gradient_check.rs`).
+
 ## Roadmap
 
 - [x] Tokenizers
@@ -341,10 +388,12 @@ The current transformer demo checks that one block preserves shape:
     - [x] 28.5 Implement CNN denoiser (5-layer, 5×5 kernels)
     - [x] 28.6 Train DDPM on MNIST (28×28 image generation)
     - [x] 28.7 Integrate classifier-free guidance (CFG)
-    - [ ] 28.8 Implement DDIM sampler (deterministic reverse diffusion, fewer steps)
-    - [ ] 28.9 Implement cosine noise schedule (Nichol & Dhariwal, 2021)
-    - [ ] 28.10 Implement U-Net architecture (encoder-decoder + skip connections)
-    - [ ] 28.11 Add attention layers in U-Net bottleneck
+    - [x] 28.8 Implement DDIM sampler (deterministic reverse diffusion, fewer steps)
+    - [x] 28.9 Implement cosine noise schedule (Nichol & Dhariwal, 2021)
+    - [x] 28.10 Implement U-Net architecture (encoder-decoder + skip connections)
+    - [x] 28.11 Add attention layers in U-Net bottleneck
+    - [x] 28.11b Implement DPM-Solver++ (2M) 2nd-order exponential ODE sampler (8–10 steps)
+    - [x] 28.11c Implement Adaptive Group Normalization (AdaGN) U-Net architecture (per-layer modulation & direct 1-ch input)
     - [ ] 28.12 Implement DiT (Diffusion Transformer) denoiser
     - [ ] 28.13 Implement latent diffusion (VAE encoder → diffuse in latent space → decode)
 - [ ] 28b. RAG & Vector Databases

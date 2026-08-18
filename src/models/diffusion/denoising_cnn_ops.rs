@@ -14,12 +14,13 @@
 //   2. `shift_and_pad`          — spatial shift with zero-fill (backward helper).
 //   3. `manual_conv2d_backward` — gradient w.r.t. weights and input.
 //
-// Parallelism:
-//   All three functions use `rayon` to parallelise the per-kernel-position
-//   (dy, dx) work.  For a 5×5 kernel this is 25 independent matmuls per call;
-//   rayon schedules these across all available CPU cores.  On GPU, Candle's
-//   built-in matmul already runs in parallel, so rayon adds CPU-level
-//   parallelism on top.
+// Algorithm — Im2Col:
+//   Both forward and backward use the im2col transformation to express
+//   convolution as a single matrix multiply. The kernel is flattened to
+//   w_col (C_out, C_in * kH * kW) and the input patches are stacked into
+//   x_col (B, C_in * kH * kW, H * W). The forward pass is then just
+//   w_col @ x_col, yielding (B, C_out, H * W) in one matmul regardless of
+//   kernel size.
 //
 // Kernel-size agnostic:
 //   All functions derive padding from the kernel dimensions (kh, kw) rather
@@ -28,10 +29,10 @@
 // =============================================================================
 
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor};
+use candle_core::{Device, Tensor};
 
 // =============================================================================
-// manual_conv2d — zero-padded 2-D convolution implemented via matmul loops
+// manual_conv2d — zero-padded 2-D convolution via im2col + matmul
 // =============================================================================
 //
 // WHY implement conv from scratch instead of using candle-nn?
@@ -41,28 +42,23 @@ use candle_core::{DType, Device, Tensor};
 //   forward pass as explicit matmuls makes the index math transparent and
 //   the forward ↔ backward pairing unambiguous.
 //
-// Algorithm: sliding-window decomposition into matmuls
-//   For each kernel position (dy, dx) in {0..kh} × {0..kw}:
+// Algorithm: im2col transformation + single matmul
 //
-//     1. Slice the zero-padded input at this kernel offset:
-//          x_slice = x_padded[:, :, dy : dy+H, dx : dx+W]
-//          shape   = (B, C_in, H, W)
+//   1. Zero-pad the input with SAME padding:
+//        pad_h = (kh - 1) / 2,  pad_w = (kw - 1) / 2
 //
-//     2. Reshape to a 2-D matrix for matmul:
-//          x_perm  = x_slice.permute(C_in, B, H, W) → reshape(C_in, B*H*W)
+//   2. Extract all kH × kW overlapping patches from the padded input,
+//      reshape each to (B, C_in, H*W), and concatenate along the channel
+//      dimension to form:
+//        x_col  shape (B, C_in * kH * kW, H * W)
 //
-//     3. Extract the weight sub-matrix for this position:
-//          w_slice = w[:, :, dy, dx]  shape (C_out, C_in)
+//   3. Flatten the kernel:
+//        w_col  shape (C_out, C_in * kH * kW)
 //
-//     4. Multiply: out_slice = w_slice @ x_perm  shape (C_out, B*H*W)
+//   4. Single batched matmul:
+//        y_flat = w_col @ x_col  shape (B, C_out, H * W)
 //
-//     5. Reshape back and accumulate into y: (B, C_out, H, W)
-//
-// Parallelism (rayon):
-//   Each (dy, dx) pair is independent — it produces one additive contribution
-//   to the output.  `rayon::flat_map + into_par_iter` schedules all kh×kw
-//   matmuls in parallel across CPU threads, then accumulates sequentially.
-//   For 3×3 kernels this is 9-way parallelism; for 5×5 kernels, 25-way.
+//   5. Reshape y_flat to (B, C_out, H, W) and optionally add bias.
 //
 // Zero-padding ("SAME" mode):
 //   pad_h = (kh - 1) / 2   (1 for 3×3, 2 for 5×5)
@@ -79,7 +75,7 @@ pub fn manual_conv2d(
     x: &Tensor,
     w: &Tensor,
     bias: Option<&Tensor>,
-    device: &Device,
+    _device: &Device,
 ) -> Result<Tensor> {
     let (b, c_in, h, w_img) = x.dims4()?;
     let (c_out, _, kh, kw) = w.dims4()?;
@@ -91,61 +87,34 @@ pub fn manual_conv2d(
     // --- Zero-pad height axis -----------------------------------------------
     // WHY pad conditionally? For kh=1 (no spatial extent), padding is zero
     // and we skip the Tensor::cat to avoid an unnecessary allocation.
-    let x_padded_y = if pad_h > 0 {
-        let zero_row = Tensor::zeros((b, c_in, pad_h, w_img), DType::F32, device)?;
-        Tensor::cat(&[&zero_row, x, &zero_row], 2)?
+    let x_padded = if pad_h > 0 || pad_w > 0 {
+        x.pad_with_zeros(2, pad_h, pad_h)?
+            .pad_with_zeros(3, pad_w, pad_w)?
     } else {
         x.clone()
     };
 
-    // --- Zero-pad width axis ------------------------------------------------
-    let x_padded = if pad_w > 0 {
-        let zero_col = Tensor::zeros((b, c_in, h + 2 * pad_h, pad_w), DType::F32, device)?;
-        Tensor::cat(&[&zero_col, &x_padded_y, &zero_col], 3)?
-    } else {
-        x_padded_y
-    };
 
-    // --- Sequential per-position matmuls, folded straight into the accumulator --
-    //
-    // WHY sequential instead of rayon here?
-    //   Collecting all kh*kw position outputs into a Vec before summing (the
-    //   previous approach) keeps every one of them alive simultaneously — a
-    //   kh*kw-fold peak memory multiplier on top of the accumulator itself.
-    //   Folding each position straight into `y` as it's computed caps the
-    //   extra live memory at one position's worth, regardless of kernel size.
-    //   Candle's matmul is already internally parallel (BLAS/cuBLAS), so the
-    //   rayon layer here was CPU-thread parallelism over tiny per-position
-    //   work, not the dominant cost — trading it away buys back memory
-    //   headroom that matters far more on memory-constrained boxes.
-    let mut y = Tensor::zeros((b, c_out, h, w_img), DType::F32, device)?;
+    // --- Im2Col Transformation ------------------------------------------------
+    // Extract all kernel patches and concatenate them along the channel dimension.
+    let mut slices = Vec::with_capacity(kh * kw);
     for dy in 0..kh {
         for dx in 0..kw {
-            // Extract the spatial slice at kernel offset (dy, dx).
             let x_slice = x_padded.narrow(2, dy, h)?.narrow(3, dx, w_img)?;
-
-            // Reshape to (C_in, B*H*W) for the matmul.
-            let x_flat = x_slice.reshape((b, c_in, h * w_img))?;
-            let x_perm = x_flat.permute((1, 0, 2))?.reshape((c_in, b * h * w_img))?;
-
-            // w_slice: (C_out, C_in) — weights for this kernel position.
-            let w_slice = w
-                .narrow(2, dy, 1)?
-                .narrow(3, dx, 1)?
-                .reshape((c_out, c_in))?;
-
-            // out_slice = w_slice @ x_perm  → (C_out, B*H*W)
-            // .contiguous() ensures the matmul operates on a dense layout,
-            // avoiding potential incorrect results from non-contiguous strides.
-            let out_slice = w_slice.contiguous()?.matmul(&x_perm.contiguous()?)?;
-
-            // Reshape (C_out, B*H*W) → (B, C_out, H, W) and fold in immediately.
-            let out_reshaped = out_slice
-                .reshape((c_out, b, h, w_img))?
-                .permute((1, 0, 2, 3))?;
-            y = y.add(&out_reshaped)?;
+            slices.push(x_slice.reshape((b, c_in, h * w_img))?);
         }
     }
+    // x_col shape: (B, C_in * kH * kW, H * W)
+    let x_col = Tensor::cat(&slices, 1)?;
+
+    // w_col shape: (C_out, C_in * kH * kW)
+    let w_col = w.reshape((c_out, c_in * kh * kw))?;
+
+    // y_flat shape: (B, C_out, H * W)
+    let y_flat = w_col.broadcast_matmul(&x_col.contiguous()?)?;
+
+    // Reshape back to (B, C_out, H, W)
+    let mut y = y_flat.reshape((b, c_out, h, w_img))?;
 
     // Add bias, broadcast (1, C_out, 1, 1) → (B, C_out, H, W).
     if let Some(bi) = bias {
@@ -182,19 +151,22 @@ pub fn manual_conv2d(
 //   sy, sx — shift amounts along H and W respectively
 //   device — device for zero tensors
 pub fn shift_and_pad(t: &Tensor, sy: i32, sx: i32, device: &Device) -> Result<Tensor> {
+    if sy == 0 && sx == 0 {
+        return Ok(t.clone());
+    }
     let (b, c, h, w) = t.dims4()?;
     let mut out = t.clone();
 
     // --- Vertical shift (height axis = dim 2) --------------------------------
     if sy > 0 {
         // Shift down by sy: prepend sy zero rows, drop last sy rows.
-        let zero = Tensor::zeros((b, c, sy as usize, w), DType::F32, device)?;
+        let zero = Tensor::zeros((b, c, sy as usize, w), t.dtype(), device)?;
         let sliced = t.narrow(2, 0, h - sy as usize)?; // keep rows [0, H-sy)
         out = Tensor::cat(&[&zero, &sliced], 2)?;
     } else if sy < 0 {
         // Shift up by |sy|: drop first |sy| rows, append |sy| zero rows.
         let abs_sy = sy.unsigned_abs() as usize;
-        let zero = Tensor::zeros((b, c, abs_sy, w), DType::F32, device)?;
+        let zero = Tensor::zeros((b, c, abs_sy, w), t.dtype(), device)?;
         let sliced = t.narrow(2, abs_sy, h - abs_sy)?; // keep rows [|sy|, H)
         out = Tensor::cat(&[&sliced, &zero], 2)?;
     }
@@ -203,13 +175,13 @@ pub fn shift_and_pad(t: &Tensor, sy: i32, sx: i32, device: &Device) -> Result<Te
     // --- Horizontal shift (width axis = dim 3) -------------------------------
     if sx > 0 {
         // Shift right by sx: prepend sx zero columns, drop last sx columns.
-        let zero = Tensor::zeros((b, c, h, sx as usize), DType::F32, device)?;
+        let zero = Tensor::zeros((b, c, h, sx as usize), t.dtype(), device)?;
         let sliced = out.narrow(3, 0, w - sx as usize)?;
         out = Tensor::cat(&[&zero, &sliced], 3)?;
     } else if sx < 0 {
         // Shift left by |sx|: drop first |sx| columns, append |sx| zero columns.
         let abs_sx = sx.unsigned_abs() as usize;
-        let zero = Tensor::zeros((b, c, h, abs_sx), DType::F32, device)?;
+        let zero = Tensor::zeros((b, c, h, abs_sx), t.dtype(), device)?;
         let sliced = out.narrow(3, abs_sx, w - abs_sx)?;
         out = Tensor::cat(&[&sliced, &zero], 3)?;
     }
@@ -231,28 +203,20 @@ pub fn shift_and_pad(t: &Tensor, sy: i32, sx: i32, device: &Device) -> Result<Te
 //   dw      — gradient of the loss w.r.t. the conv weights w
 //              shape: (C_out, C_in, kH, kW)
 //
-// Theory (chain rule through the sliding-window matmul):
+// Algorithm — im2col backward:
 //
-//   For each kernel position (dy, dx):
+//   1. Build x_col (B, C_in * kH * kW, H * W) from shifted input patches,
+//      mirroring the forward im2col transformation.
 //
-//   Weight gradient:
-//     At forward time, position (dy, dx) computed:
-//       out_slice = w_slice @ x_perm,  where x_perm = shift_and_pad(x, sy, sx)
-//     By the chain rule:
-//       dw_slice = delta_y_flat @ x_perm^T
-//     This is the outer product of upstream gradient and the input patch.
+//   2. Weight gradient:
+//        dw = sum_B(delta_y_flat @ x_col^T)  →  reshape to (C_out, C_in, kH, kW)
+//      This is the outer product of upstream gradient and input columns,
+//      summed over the batch dimension.
 //
-//   Input gradient:
-//     The input contributes to the output at every kernel position, so:
-//       dx_perm  = w_slice^T @ delta_y_flat
-//       dx_slice = reshape dx_perm, then shift back by (-sy, -sx)
-//     Summing over all (dy, dx) positions gives the full input gradient —
-//     equivalent to full convolution with the spatially-flipped kernel.
-//
-// Parallelism:
-//   Same rayon parallel strategy as manual_conv2d: kh×kw independent tasks.
-//   Results are stored in a flat Vec indexed by (dy * kw + dx) and then
-//   assembled into (C_out, C_in, kH, kW) via nested Tensor::cat.
+//   3. Input gradient (col2im):
+//        delta_x_col = w_col^T @ delta_y_flat  →  (B, C_in * kH * kW, H * W)
+//      Then fold back into (B, C_in, H, W) by extracting each offset's
+//      slice and applying the inverse shift via shift_and_pad(-sy, -sx).
 //
 // Arguments:
 //   x       — the forward input, shape (B, C_in, H, W)
@@ -276,84 +240,66 @@ pub fn manual_conv2d_backward(
     let pad_h = (kh - 1) as i32 / 2;
     let pad_w = (kw - 1) as i32 / 2;
 
-    // --- Sequential per-position computation, folded straight into delta_x ---
-    //
-    // WHY sequential instead of rayon here?
-    //   Same reasoning as manual_conv2d's forward: collecting all kh*kw
-    //   (dx_shifted, dw_slice) pairs before summing kept every dx_shifted
-    //   alive at once — each one full (B, C_in, H, W), the dominant memory
-    //   cost of this function. Folding delta_x immediately caps that to one
-    //   position's worth. dw_slice stays cheap ((C_out, C_in, 1, 1)) and is
-    //   collected into a small Vec for the final cat — that part is unchanged.
-    let mut delta_x = Tensor::zeros((b, c_in, h, w_img), DType::F32, device)?;
-    let mut dw_dy_list = Vec::with_capacity(kh);
+    // --- Im2Col Backward Transformation ---------------------------------------
+    // Flatten delta_y: shape (B, C_out, H * W)
+    let delta_y_flat = delta_y.reshape((b, c_out, h * w_img))?;
+
+    // 1. Build x_col using zero-padded input slicing (matching forward im2col)
+    let x_padded = if pad_h > 0 || pad_w > 0 {
+        x.pad_with_zeros(2, pad_h as usize, pad_h as usize)?
+            .pad_with_zeros(3, pad_w as usize, pad_w as usize)?
+    } else {
+        x.clone()
+    };
+
+    let mut slices = Vec::with_capacity(kh * kw);
     for dy in 0..kh {
-        let mut dw_dx_list = Vec::with_capacity(kw);
         for dx in 0..kw {
-            // sy, sx: the backward shift that undoes the forward narrowing.
-            //   Forward at (dy, dx) read x_padded[dy..dy+H, dx..dx+W].
-            //   Backward shift = (pad_h - dy, pad_w - dx).
+            let x_slice = x_padded.narrow(2, dy, h)?.narrow(3, dx, w_img)?;
+            slices.push(x_slice.reshape((b, c_in, h * w_img))?);
+        }
+    }
+    // x_col shape: (B, C_in * kH * kW, H * W)
+    let x_col = Tensor::cat(&slices, 1)?;
+
+    // 2. Weight gradient: dw = sum_B(delta_y_flat @ x_col^T)
+    // Reshape to 2D (C_out, B * H * W) and (C_in * kH * kW, B * H * W) to compute
+    // dw via a single high-throughput 2D GEMM without allocating a 3D batch tensor.
+    let delta_y_2d = delta_y_flat
+        .transpose(0, 1)?
+        .contiguous()?
+        .reshape((c_out, b * h * w_img))?;
+    let x_col_2d = x_col
+        .transpose(0, 1)?
+        .contiguous()?
+        .reshape((c_in * kh * kw, b * h * w_img))?;
+    let dw = delta_y_2d
+        .matmul(&x_col_2d.t()?)?
+        .reshape((c_out, c_in, kh, kw))?;
+
+    // 3. Input gradient: delta_x_col = w_col^T @ delta_y_flat
+    // w_col shape: (C_out, C_in * kH * kW)
+    let w_col = w.reshape((c_out, c_in * kh * kw))?;
+    // w_col^T @ delta_y_flat -> (B, C_in * kH * kW, H * W)
+    let delta_x_col = w_col.t()?.broadcast_matmul(&delta_y_flat.contiguous()?)?;
+
+    // 4. Fold delta_x_col back into delta_x using inverse shifts (Col2Im)
+    let mut delta_x = Tensor::zeros((b, c_in, h, w_img), x.dtype(), device)?;
+    for dy in 0..kh {
+        for dx in 0..kw {
+            let idx = dy * kw + dx;
             let sy = pad_h - (dy as i32);
             let sx = pad_w - (dx as i32);
 
-            // x_slice: the same input patch that forward saw at (dy, dx).
-            let x_slice = shift_and_pad(x, sy, sx, device)?;
-            let x_flat = x_slice.reshape((b, c_in, h * w_img))?;
-            // x_perm shape: (C_in, B*H*W)
-            let x_perm = x_flat.permute((1, 0, 2))?.reshape((c_in, b * h * w_img))?;
+            // Extract the slice corresponding to this offset
+            let dx_slice_flat = delta_x_col.narrow(1, idx * c_in, c_in)?; // (B, C_in, H * W)
+            let dx_slice = dx_slice_flat.reshape((b, c_in, h, w_img))?;
 
-            // Flatten delta_y for this position: shape (C_out, B*H*W).
-            // We use the same delta_y for all positions (it's the output
-            // gradient which doesn't vary with (dy, dx)).
-            let delta_out_slice = delta_y
-                .reshape((b, c_out, h * w_img))?
-                .permute((1, 0, 2))?
-                .reshape((c_out, b * h * w_img))?;
-
-            // --- Weight gradient for this (dy, dx) -----------------------
-            // dw_slice = delta_y_flat @ x_perm^T  → (C_out, C_in)
-            // Reshaped to (C_out, C_in, 1, 1) for assembly into (C_out, C_in, kH, kW).
-            let dw_slice = delta_out_slice
-                .contiguous()?
-                .matmul(&x_perm.t()?.contiguous()?)?
-                .reshape((c_out, c_in, 1, 1))?;
-            dw_dx_list.push(dw_slice);
-
-            // --- Input gradient for this (dy, dx) ------------------------
-            // w_slice: (C_out, C_in) — same kernel slice as in forward.
-            let w_slice = w
-                .narrow(2, dy, 1)?
-                .narrow(3, dx, 1)?
-                .reshape((c_out, c_in))?;
-
-            // dx_perm = w_slice^T @ delta_y_flat  → (C_in, B*H*W)
-            let dx_perm = w_slice
-                .t()?
-                .contiguous()?
-                .matmul(&delta_out_slice.contiguous()?)?;
-
-            // Reshape to (B, C_in, H, W).
-            let dx_slice = dx_perm
-                .reshape((c_in, b, h * w_img))?
-                .permute((1, 0, 2))?
-                .reshape((b, c_in, h, w_img))?;
-
-            // Reverse the forward shift to align with the unpadded input.
-            // WHY -sy, -sx? We shifted x forward by (sy, sx) to extract
-            // the patch; the inverse shift puts the gradient back in the
-            // correct coordinate frame.
+            // Reverse the shift
             let dx_shifted = shift_and_pad(&dx_slice, -sy, -sx, device)?;
             delta_x = delta_x.add(&dx_shifted)?;
         }
-        // Concatenate across the kW dimension for this row.
-        let dw_dx_refs: Vec<&Tensor> = dw_dx_list.iter().collect();
-        let dw_dy = Tensor::cat(&dw_dx_refs, 3)?;
-        dw_dy_list.push(dw_dy);
     }
-
-    // Concatenate all kH rows along dim 2 → final shape (C_out, C_in, kH, kW).
-    let dw_dy_refs: Vec<&Tensor> = dw_dy_list.iter().collect();
-    let dw = Tensor::cat(&dw_dy_refs, 2)?;
 
     Ok((delta_x, dw))
 }
