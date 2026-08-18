@@ -26,6 +26,7 @@ pub fn save_model_checkpoint(model: &dyn Parameterized, path: impl AsRef<Path>) 
         .into_iter()
         .map(|(name, tensor)| (name.to_owned(), tensor.clone()))
         .collect();
+    crate::utils::ensure_parent_dir(&path)?;
     safetensors::save(&tensors, path)?;
     Ok(())
 }

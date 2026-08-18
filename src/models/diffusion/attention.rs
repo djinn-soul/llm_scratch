@@ -4,11 +4,33 @@ use candle_nn::VarMap;
 
 use crate::common::varstore;
 
+// =============================================================================
+// SPATIAL SELF-ATTENTION (Bottleneck Attention for Diffusion U-Nets)
+// =============================================================================
+//
+// Convolutions have a local receptive field: a 3x3 kernel only connects
+// adjacent pixels. To understand global semantic relationships (e.g. "is the
+// top loop of a digit 8 connected to the bottom loop?"), the network needs
+// long-range communication.
+//
+// Spatial Self-Attention treats every pixel in a feature map as a token:
+//   - Feature map: [B, C, H, W]
+//   - Sequence view: [B, C, N] where N = H * W (e.g. 14x14 = 196 tokens)
+//   - Attention matrix: [B, N, N] — allows EVERY pixel to attend to EVERY other pixel!
+//
+// ── WHY AT THE BOTTLENECK? ──
+// At the 28x28 input resolution, N = 784, so an N x N attention matrix has
+// 784² ≈ 614,656 elements (too slow).
+// At the 14x14 bottleneck, N = 196, so N² = 38,416 elements (fast & memory-efficient).
+
 pub struct SpatialSelfAttention {
+    /// Fused Q, K, V projection matrix of shape [3 * C, C].
+    /// Projects each C-dim pixel feature simultaneously into Q, K, and V vectors.
     pub w_qkv: Tensor,
 }
 
 impl SpatialSelfAttention {
+    /// Constructs a new SpatialSelfAttention module with Xavier/Glorot scaling.
     pub fn new(channels: usize, varmap: &VarMap, prefix: &str, device: &Device) -> Result<Self> {
         let scale = (1.0f64 / channels as f64).sqrt();
         let w_qkv = varstore::register(
@@ -19,6 +41,15 @@ impl SpatialSelfAttention {
         Ok(Self { w_qkv })
     }
 
+    /// Forward pass for Spatial Self-Attention.
+    ///
+    /// Algorithm:
+    ///   1. Reshape spatial image [B, C, H, W] to token sequence [B, C, N] where N = H * W
+    ///   2. Project tokens into Queries, Keys, Values via w_qkv: [B, 3C, N]
+    ///   3. Compute scaled dot-product attention scores: S = (Q^T @ K) / √C  shape [B, N, N]
+    ///   4. Softmax across key dimension: A = softmax(S, dim=-1)
+    ///   5. Compute weighted context: O = V @ A^T  shape [B, C, N]
+    ///   6. Reshape back to spatial feature map: [B, C, H, W]
     pub fn forward(&self, x: &Tensor) -> Result<(Tensor, Vec<Tensor>)> {
         let (b, c, h, w) = x.dims4()?;
         let n = h * w;
@@ -26,7 +57,7 @@ impl SpatialSelfAttention {
         // 1. Reshape to sequence format: [B, C, N]
         let x_seq = x.reshape((b, c, n))?.contiguous()?;
 
-        // 2. Project Q, K, V together
+        // 2. Project Q, K, V together via batched matrix multiply
         let qkv = self.w_qkv.broadcast_matmul(&x_seq)?; // [B, 3C, N]
         let q = qkv.narrow(1, 0, c)?;
         let k = qkv.narrow(1, c, c)?;
@@ -50,6 +81,14 @@ impl SpatialSelfAttention {
         Ok((output, cached))
     }
 
+    /// Analytical backward pass for Spatial Self-Attention.
+    ///
+    /// Derives gradients using the Chain Rule:
+    ///   1. Output projection: ∂L/∂V = dY @ A,  ∂L/∂A = dY^T @ V
+    ///   2. Softmax Jacobian:  ∂L/∂S = A ⊙ (∂L/∂A - ∑_k (A ⊙ ∂L/∂A))
+    ///   3. Q, K gradients:    ∂L/∂Q = (∂L/∂S @ K) / √C,  ∂L/∂K = (Q @ ∂L/∂S^T) / √C
+    ///   4. Weight gradient:   ∂L/∂W_qkv = [∂L/∂Q, ∂L/∂K, ∂L/∂V] @ X_seq^T
+    ///   5. Input gradient:    ∂L/∂X_seq = W_qkv^T @ [∂L/∂Q, ∂L/∂K, ∂L/∂V]
     pub fn backward(
         &self,
         intermediates: &[Tensor],

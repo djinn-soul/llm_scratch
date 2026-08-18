@@ -61,6 +61,7 @@ fn save_grid_png(path: &str, images_flat: &[f32], rows: usize, cols: usize) -> R
     use std::fs::File;
     use std::io::BufWriter;
 
+    llm_scratch_rs::utils::ensure_parent_dir(path)?;
     let file = File::create(path)?;
     let ref mut w = BufWriter::new(file);
 

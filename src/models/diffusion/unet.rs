@@ -72,14 +72,40 @@ fn group_norm_backward(
 /// Applies Adaptive Group Normalization (Forward)
 ///
 /// Shapes:
-///   x:     (B, C, H, W)
-///   gamma: (B, C) -> broadcasts to (B, C, 1, 1)
-///   beta:  (B, C) -> broadcasts to (B, C, 1, 1)
+// =============================================================================
+// ADAPTIVE GROUP NORMALIZATION (AdaGN) HELPERS
+// =============================================================================
+//
+// In standard GroupNorm, feature activations are normalized per-channel group.
+// AdaGN extends this by dynamically scaling (gain γ) and shifting (bias β) the
+// normalized features using conditioning information (timestep t + class label c):
+//
+//   AdaGN(x, c) = GroupNorm(x) ⊙ (1 + γ(c)) + β(c)
+//
+// ── WHY (1 + γ) INSTEAD OF γ? ──
+// By initializing the projection layers to zeros (w_ada = 0, b_ada = 0), at step 0:
+//   γ = 0, β = 0  ==>  y = GroupNorm(x) ⊙ (1 + 0) + 0 = GroupNorm(x)
+// This "Identity Initialization" guarantees training starts smoothly as standard
+// GroupNorm without exploding activations or destroying early gradients.
+
+/// Applies Adaptive Group Normalization (Forward pass).
+///
+/// Modulates normalized activations x̂ with per-channel scale (γ) and shift (β).
+///
+/// Mathematical Formulation:
+///   1. x̂ = GroupNorm(x) = (x - μ_g) / √(σ_g² + ε)
+///   2. y = x̂ ⊙ (1 + γ) + β
+///
+/// Shapes:
+///   - `x`:       `[B, C, H, W]`
+///   - `gamma`:   `[B, C]` -> broadcasts across `[B, C, 1, 1]`
+///   - `beta`:    `[B, C]` -> broadcasts across `[B, C, 1, 1]`
+///   - `groups`:  number of channel groups G (e.g. 4 groups of 4 channels)
 ///
 /// Returns:
-///   y:       (B, C, H, W) modulated activations
-///   x_hat:   (B, C, H, W) normalized activations (saved for backward)
-///   inv_std: (B, G, 1) inverse standard deviation (saved for backward)
+///   - `y`:       `[B, C, H, W]` modulated output tensor
+///   - `x_hat`:   `[B, C, H, W]` normalized activations (saved for backward)
+///   - `inv_std`: `[B, G, 1]` group inverse standard deviations (saved for backward)
 pub fn adagn_forward(
     x: &Tensor,
     gamma: &Tensor,
@@ -88,37 +114,39 @@ pub fn adagn_forward(
 ) -> Result<(Tensor, Tensor, Tensor)> {
     let (b, c, _h, _w) = x.dims4()?;
 
-    // 1. compute standard group normalized  activation xhat : (b,c,h,w)
-
+    // Step 1: Standard group normalization: x̂ ~ N(0, 1) per group
     let (x_hat, inv_std) = group_norm_forward(x, groups)?;
 
-    // 2. reshape scale (y) and shift (beta) to (b,c,1,1)
-
+    // Step 2: Reshape condition vectors (B, C) to (B, C, 1, 1) for spatial broadcast
     let gamma_b = gamma.reshape((b, c, 1, 1))?;
     let beta_b = beta.reshape((b, c, 1, 1))?;
 
-    // 3. compute(1+y)
+    // Step 3: Compute modulation factor (1 + γ)
     let one_plus_gamma = gamma_b.affine(1.0, 1.0)?;
 
-    // 4.Modulate:y = xhat * (1+y)+b
+    // Step 4: Modulate activations: y = x̂ * (1 + γ) + β
     let y = x_hat.broadcast_mul(&one_plus_gamma)?.broadcast_add(&beta_b)?;
 
     Ok((y, x_hat, inv_std))
 }
 
-/// Backward pass for Adaptive Group Normalization
+/// Backward pass for Adaptive Group Normalization.
 ///
-/// Inputs:
-///   delta_y: (B, C, H, W) upstream gradient
-///   x_hat:   (B, C, H, W) normalized activations from forward
-///   inv_std: (B, G, 1) cached from forward
-///   gamma:   (B, C) scale from forward
-///   groups:  group count (e.g. 4)
+/// Applies analytical Chain Rule calculus to compute gradients w.r.t.:
+///   - Shift β:      ∂L/∂β = ∑_{H, W} ∂L/∂y
+///   - Scale γ:      ∂L/∂γ = ∑_{H, W} (∂L/∂y ⊙ x̂)
+///   - Normalized x̂: ∂L/∂x̂ = ∂L/∂y ⊙ (1 + γ)
+///   - Raw input x:  ∂L/∂x = GroupNormBackward(∂L/∂x̂)
+///
+/// Arguments:
+///   - `delta_y`:  `[B, C, H, W]` upstream gradient flowing into this layer
+///   - `x_hat`:    `[B, C, H, W]` cached normalized activations from forward()
+///   - `inv_std`:  `[B, G, 1]` cached inverse std from forward()
+///   - `gamma`:    `[B, C]` scale parameter used during forward()
+///   - `groups`:   channel groups G
 ///
 /// Returns:
-///   (delta_x, delta_gamma, delta_beta)
-///
-
+///   - `(delta_x, delta_gamma, delta_beta)`
 pub fn adagn_backward(
     delta_y: &Tensor,
     x_hat: &Tensor,
@@ -128,18 +156,18 @@ pub fn adagn_backward(
 ) -> Result<(Tensor, Tensor, Tensor)> {
     let (b, c, _, _) = delta_y.dims4()?;
 
-    //1. delta_beta = sum across H and W: shape (b,c)
+    // 1. ∂L/∂β: sum gradient across spatial dimensions H (axis 2) and W (axis 3) -> [B, C]
     let delta_beta = delta_y.sum(3)?.sum(2)?;
 
-    //2. delta_gamma = sum across H and W and multiply with xhat : shape (b,c)
+    // 2. ∂L/∂γ: sum (delta_y * x_hat) across spatial dimensions -> [B, C]
     let delta_gamma = delta_y.mul(x_hat)?.sum(3)?.sum(2)?;
 
-    //3. delta_xhat = delta_y * (1 + gamma): shape (b,c,h,w)
-    let gamme_b = gamma.reshape((b, c, 1, 1))?;
-    let one_plus_gamma = gamme_b.affine(1.0, 1.0)?;
+    // 3. ∂L/∂x̂: scale upstream gradient by (1 + γ) -> [B, C, H, W]
+    let gamma_b = gamma.reshape((b, c, 1, 1))?;
+    let one_plus_gamma = gamma_b.affine(1.0, 1.0)?;
     let delta_xhat = delta_y.broadcast_mul(&one_plus_gamma)?;
 
-    //4. delta_x = group_norm_backward
+    // 4. ∂L/∂x: propagate gradient through the standard GroupNorm backprop equation
     let delta_x = group_norm_backward(&delta_xhat, x_hat, inv_std, groups)?;
 
     Ok((delta_x, delta_gamma, delta_beta))
@@ -576,33 +604,51 @@ impl Parameterized for SimpleDenoisingUNet {
     }
 }
 
+// =============================================================================
+// ADAPTIVE GROUP NORMALIZATION U-NET (SimpleDenoisingUNetAdaGN)
+// =============================================================================
+//
+// Modern Diffusion Architecture (ADM / Stable Diffusion standard).
+//
+// Key Differences from SimpleDenoisingUNet:
+//   1. 1-Channel Input: Image enters directly into `w1: [16, 1, 3, 3]` without
+//      needing an artificial 28x28 spatial conditioning broadcast map.
+//   2. Deep Conditioning Injection: Conditioning c = [time_emb, class_one_hot]
+//      is projected via Linear layers (w_ada1..4) into (γ, β) scales and shifts
+//      that modulate every normalization layer throughout the entire depth.
+//   3. Identity Start: All AdaGN projection weights and biases are initialized
+//      to zeros, ensuring the network begins training identically to standard
+//      GroupNorm.
+//   4. Hand-written Backpropagation: Full analytical gradients across all 5 conv
+//      layers, bottleneck self-attention, and the 4 AdaGN linear projections.
 pub struct SimpleDenoisingUNetAdaGN {
     varmap: VarMap,
     pub img_dim: usize,
     pub cond_dim: usize,
 
     // Convolutions (Note: w1 now takes 1 channel instead of 2!)
-    pub w1: Tensor, // [16, 1, 3, 3]
+    pub w1: Tensor, // [16, 1, 3, 3] Level 1 Encoder
     pub b1: Tensor, // [16]
-    pub w2: Tensor, // [32, 16, 3, 3]
+    pub w2: Tensor, // [32, 16, 3, 3] Level 2 Encoder
     pub b2: Tensor, // [32]
-    pub w3: Tensor, // [32, 32, 3, 3]
+    pub w3: Tensor, // [32, 32, 3, 3] Bottleneck Conv
     pub b3: Tensor, // [32]
-    pub w4: Tensor, // [16, 48, 3, 3]
+    pub w4: Tensor, // [16, 48, 3, 3] Decoder Conv (concat 32-ch up + 16-ch skip)
     pub b4: Tensor, // [16]
-    pub w5: Tensor, // [1, 16, 3, 3]
+    pub w5: Tensor, // [1, 16, 3, 3] Output projection to 1 image channel
     pub b5: Tensor, // [1]
 
     // AdaGN Linear Projections (cond_dim -> 2 * channels)
-    pub w_ada1: Tensor, // [32, cond_dim] (for γ1[16] + β1[16])
+    pub w_ada1: Tensor, // [32, cond_dim] (outputs γ1[16] + β1[16])
     pub b_ada1: Tensor, // [32]
-    pub w_ada2: Tensor, // [64, cond_dim] (for γ2[32] + β2[32])
+    pub w_ada2: Tensor, // [64, cond_dim] (outputs γ2[32] + β2[32])
     pub b_ada2: Tensor, // [64]
-    pub w_ada3: Tensor, // [64, cond_dim] (for γ3[32] + β3[32])
+    pub w_ada3: Tensor, // [64, cond_dim] (outputs γ3[32] + β3[32])
     pub b_ada3: Tensor, // [64]
-    pub w_ada4: Tensor, // [32, cond_dim] (for γ4[16] + β4[16])
+    pub w_ada4: Tensor, // [32, cond_dim] (outputs γ4[16] + β4[16])
     pub b_ada4: Tensor, // [32]
 
+    // Bottleneck Spatial Self-Attention
     pub attn: SpatialSelfAttention,
 }
 

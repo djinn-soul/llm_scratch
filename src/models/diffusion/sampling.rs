@@ -1356,6 +1356,29 @@ fn predict_x0(xt: &Tensor, pred_noise: &Tensor, alpha_bar: f64) -> Result<Tensor
     Ok(pred_x0)
 }
 
+/// 2nd-Order Multistep DPM-Solver++ (2M) reverse diffusion sampler with CFG.
+///
+/// ── MATHEMATICAL DERIVATION (Lu et al., NeurIPS 2022) ──
+///
+/// The Probability Flow ODE for diffusion models can be parameterized in terms
+/// of the half log-SNR variable:
+///   λ_t = 1/2 * ln(ᾱ_t / (1 - ᾱ_t))
+///
+/// Under this change of variables, the reverse ODE becomes semi-linear:
+///   dx_λ / dλ = -x_λ + f(λ)
+///
+/// DPM-Solver++ uses exact exponential integration for the linear part (-x_λ):
+///   1. Step 0 (1st-Order Base Step):
+///      x_{i+1} = (σ_{i+1} / σ_i) * x_i - α_{i+1} * (e^{-h} - 1) * x̂_0^{(i)}
+///
+///   2. Steps >= 1 (2nd-Order Adams-Bashforth Multistep Correction):
+///      Using previous slope D_1 = (x̂_0^{(i)} - x̂_0^{(i-1)}) / r_0 where r_0 = h_{i-1} / h_i:
+///      x_{i+1} = Base_Step - α_{i+1} * [(e^{-h} - 1 + h) / h] * D_1
+///
+/// Why this achieves 10x speedup:
+///   Standard Euler solvers (DDIM) approximate the curved trajectory with straight
+///   line segments. DPM-Solver++ tracks the exact exponential curvature analytically,
+///   enabling sharp generation in only 8–10 steps!
 pub fn sample_dpm_solver_2m_cfg_strided_with_callback<F>(
     model: &dyn DenoisingModel,
     scheduler: &BetaScheduler,

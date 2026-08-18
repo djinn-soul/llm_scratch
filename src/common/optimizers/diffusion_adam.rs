@@ -297,6 +297,7 @@ impl MlpAdamOptimizer {
         // Rename within a directory is atomic, so the destination is either the
         // previous checkpoint or the complete new one.
         let path = path.as_ref();
+        crate::utils::ensure_parent_dir(path)?;
         let temp = path.with_extension("safetensors.tmp");
         safetensors::save(&tensors, &temp)?;
         // Windows rename fails if the destination exists, unlike POSIX.

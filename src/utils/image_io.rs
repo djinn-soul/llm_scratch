@@ -36,8 +36,7 @@ pub fn save_png(path: &str, image_flat: &[f32]) -> Result<()> {
         bail!("cannot save non-finite pixel at index {index}: {value}");
     }
 
-    // BufWriter batches the encoder's small writes and leaves PNG chunk framing
-    // and checksums to the png crate.
+    crate::utils::ensure_parent_dir(path)?;
     let file = File::create(path)?;
     let writer = BufWriter::new(file);
     let mut encoder = png::Encoder::new(writer, MNIST_SIDE, MNIST_SIDE);
