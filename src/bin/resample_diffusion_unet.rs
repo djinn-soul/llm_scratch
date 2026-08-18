@@ -184,11 +184,25 @@ fn parse_cli() -> Result<Config> {
     }
 
     let checkpoint = checkpoint.unwrap_or_else(|| {
-        if Path::new("unet_checkpoints/ema_epoch_25000.safetensors").exists() {
-            PathBuf::from("unet_checkpoints/ema_epoch_25000.safetensors")
-        } else {
-            PathBuf::from("unet_checkpoints/ema_epoch_8000.safetensors")
+        let mut latest_epoch = 0;
+        let mut latest_path = PathBuf::from("unet_checkpoints/ema_epoch_25000.safetensors");
+        if let Ok(entries) = std::fs::read_dir("unet_checkpoints") {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(filename) = path.file_name().and_then(|f| f.to_str()) {
+                    if filename.starts_with("ema_epoch_") && filename.ends_with(".safetensors") {
+                        let epoch_str = &filename["ema_epoch_".len()..filename.len() - ".safetensors".len()];
+                        if let Ok(epoch) = epoch_str.parse::<usize>() {
+                            if epoch >= latest_epoch {
+                                latest_epoch = epoch;
+                                latest_path = path.clone();
+                            }
+                        }
+                    }
+                }
+            }
         }
+        latest_path
     });
     let start_timestep = start_timestep.unwrap_or(DEFAULT_START_TIMESTEP);
 
