@@ -15,7 +15,7 @@
 //   cargo run --release --bin resample_diffusion_unet -- --sampler ddpm --steps 100
 //   cargo run --release --bin resample_diffusion_unet -- --sampler all
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
@@ -191,7 +191,8 @@ fn parse_cli() -> Result<Config> {
                 let path = entry.path();
                 if let Some(filename) = path.file_name().and_then(|f| f.to_str()) {
                     if filename.starts_with("ema_epoch_") && filename.ends_with(".safetensors") {
-                        let epoch_str = &filename["ema_epoch_".len()..filename.len() - ".safetensors".len()];
+                        let epoch_str =
+                            &filename["ema_epoch_".len()..filename.len() - ".safetensors".len()];
                         if let Ok(epoch) = epoch_str.parse::<usize>() {
                             if epoch >= latest_epoch {
                                 latest_epoch = epoch;
@@ -386,11 +387,19 @@ fn main() -> Result<()> {
 
             // Assemble a 3-row comparison grid (Row 1: DDPM, Row 2: DDIM, Row 3: DPM-Solver++)
             let comparison_path = output_dir.join("sampler_comparison_3rows.png");
-            save_grid_png(&comparison_path.to_string_lossy(), &all_samplers_flat, 3, 10)?;
+            save_grid_png(
+                &comparison_path.to_string_lossy(),
+                &all_samplers_flat,
+                3,
+                10,
+            )?;
 
             println!("\n============================================================");
             println!("  Benchmark Complete!");
-            println!("  Saved 3-Row Comparison Grid to: {}", comparison_path.display());
+            println!(
+                "  Saved 3-Row Comparison Grid to: {}",
+                comparison_path.display()
+            );
             println!("  - Row 1: DDPM (100 steps)");
             println!("  - Row 2: DDIM (20 steps)");
             println!("  - Row 3: DPM-Solver++ 2M (8 steps)");

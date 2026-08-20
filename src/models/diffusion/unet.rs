@@ -125,7 +125,9 @@ pub fn adagn_forward(
     let one_plus_gamma = gamma_b.affine(1.0, 1.0)?;
 
     // Step 4: Modulate activations: y = x̂ * (1 + γ) + β
-    let y = x_hat.broadcast_mul(&one_plus_gamma)?.broadcast_add(&beta_b)?;
+    let y = x_hat
+        .broadcast_mul(&one_plus_gamma)?
+        .broadcast_add(&beta_b)?;
 
     Ok((y, x_hat, inv_std))
 }
@@ -922,9 +924,8 @@ impl DenoisingModel for SimpleDenoisingUNetAdaGN {
 
         // 6. Attention backward (residual)
         let delta_a3_scaled = delta_a3.affine(RESIDUAL_SCALE, 0.0)?;
-        let (delta_a3_pre_from_attn, d_wqkv) = self
-            .attn
-            .backward(&intermediates[22..], &delta_a3_scaled)?;
+        let (delta_a3_pre_from_attn, d_wqkv) =
+            self.attn.backward(&intermediates[22..], &delta_a3_scaled)?;
         let delta_a3_pre_grad = delta_a3_pre_from_attn.add(&delta_a3_scaled)?;
 
         // 7. LeakyReLU + AdaGN on Level 3

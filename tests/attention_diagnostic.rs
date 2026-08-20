@@ -92,10 +92,7 @@ fn bottleneck_attention_preserves_spatial_structure() -> Result<()> {
     // Recompute raw attention scores from cached Q, K for diagnostics.
     let c = q.dim(1)?;
     let scale = 1.0 / (c as f64).sqrt();
-    let scores = q
-        .transpose(1, 2)?
-        .broadcast_matmul(k)?
-        .affine(scale, 0.0)?;
+    let scores = q.transpose(1, 2)?.broadcast_matmul(k)?.affine(scale, 0.0)?;
 
     let (b, c, h, w) = a3.dims4()?;
     let a3_seq = a3.reshape((b, c, h * w))?;

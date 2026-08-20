@@ -1,34 +1,29 @@
 use burn::module::{Module, Param};
-
 use burn::nn::{
     Embedding, EmbeddingConfig, LayerNorm, LayerNormConfig, Linear, LinearConfig, Relu,
 };
-
 use burn::tensor::backend::Backend;
 use burn::tensor::{Distribution, Tensor};
 
-use crate::models::diffusion::dit::config::DiTConfig;
-use crate::models::diffusion::dit::patch_embed;
-
+use super::config::DiTConfig;
 use super::dit_block::DiTBlock;
-use super::patch_embed::PatchEmbed;
-use super::patch_embed::{patchify, unpatchify, PatchEmbed};
+use super::patch_embed::{unpatchify, PatchEmbed};
 
 #[derive(Module, Debug)]
 pub struct DiffusionTransformer<B: Backend> {
     patch_embed: PatchEmbed<B>,
     pos_embed: Param<Tensor<B, 3>>, // [1, num_patches, hidden_dim]
     // Conditioning MLP
-    t_embede_fc1: Linear<B>,
-    t_embede_fc2: Linear<B>,
+    t_embed_fc1: Linear<B>,
+    t_embed_fc2: Linear<B>,
     class_embed: Embedding<B>,
 
     // Transformer Blocks
     dit_blocks: Vec<DiTBlock<B>>,
     // Final Layer
     final_norm: LayerNorm<B>,
-    final_adaln: Linear<B>, //[gamma , beta]
-    final_proj: Linear<B>,  // hidden_dim-> patch_size* patch_size * in_channels
+    final_adaln: Linear<B>, // [gamma, beta] -> 2 * hidden_dim
+    final_proj: Linear<B>,  // hidden_dim -> patch_size * patch_size * in_channels
     config: DiTConfig,
 }
 
@@ -52,13 +47,10 @@ impl<B: Backend> DiffusionTransformer<B> {
         ));
 
         let t_embed_fc1 = LinearConfig::new(config.hidden_dim, config.hidden_dim).init(device);
-
         let t_embed_fc2 = LinearConfig::new(config.hidden_dim, config.hidden_dim).init(device);
-
         let class_embed = EmbeddingConfig::new(config.num_classes, config.hidden_dim).init(device);
 
         let mut blocks = Vec::new();
-
         for _ in 0..config.depth {
             blocks.push(DiTBlock::new(
                 config.hidden_dim,
@@ -70,16 +62,14 @@ impl<B: Backend> DiffusionTransformer<B> {
         }
 
         let final_norm = LayerNormConfig::new(config.hidden_dim).init(device);
-
-        let final_adaln = LinearConfig::new(config.hidden_dim, config.hidden_dim).init(device);
-
+        let final_adaln = LinearConfig::new(config.hidden_dim, 2 * config.hidden_dim).init(device);
         let final_proj = LinearConfig::new(config.hidden_dim, patch_dim).init(device);
 
         Self {
             patch_embed,
             pos_embed,
-            t_embede_fc1,
-            t_embede_fc2,
+            t_embed_fc1,
+            t_embed_fc2,
             class_embed,
             dit_blocks: blocks,
             final_norm,
@@ -97,31 +87,34 @@ impl<B: Backend> DiffusionTransformer<B> {
     ) -> Tensor<B, 4> {
         let [b, _c, _h, _w] = x_t.dims();
         let d = self.config.hidden_dim;
+
         // 1. Compute conditioning vector y = MLP(t) + ClassEmbedding(c)
         let t_cond = self
-            .t_embede_fc2
-            .forward(Relu::new().forward(self.t_embede_fc1.forward(t_emb)));
+            .t_embed_fc2
+            .forward(Relu::new().forward(self.t_embed_fc1.forward(t_emb)));
 
-        let c_cond = self.class_embed.forward(class_labels);
+        let c_cond = self
+            .class_embed
+            .forward(class_labels.unsqueeze_dim(1))
+            .reshape([b, d]);
 
         let cond = t_cond + c_cond; // [B, cond_dim]
 
-        //2. Patchify + Positional Embedding
-        let mut x = self.patch_embed.forward(x_t) + self.pos_embed.val(); //[B,N,D]
+        // 2. Patchify + Positional Embedding
+        let mut x = self.patch_embed.forward(x_t) + self.pos_embed.val(); // [B, N, D]
 
-        //3. Pass through DIT Blocks
+        // 3. Pass through DiT Blocks
         for block in &self.dit_blocks {
             x = block.forward(x, cond.clone());
         }
-        // 4.Final Layernorm + adaln Modulation
 
+        // 4. Final LayerNorm + adaLN Modulation
         let final_params = self.final_adaln.forward(cond).unsqueeze_dim(1);
         let gamma = final_params.clone().slice([0..b, 0..1, 0..d]);
         let beta = final_params.slice([0..b, 0..1, d..2 * d]);
 
         x = self.final_norm.forward(x);
-
-        x = x * gamma + beta;
+        x = x * (gamma + 1.0) + beta;
 
         let x_patches = self.final_proj.forward(x);
         unpatchify(

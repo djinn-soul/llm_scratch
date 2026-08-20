@@ -394,7 +394,7 @@ The repository implements two high-performance U-Net architectures:
     - [x] 28.11 Add attention layers in U-Net bottleneck
     - [x] 28.11b Implement DPM-Solver++ (2M) 2nd-order exponential ODE sampler (8–10 steps)
     - [x] 28.11c Implement Adaptive Group Normalization (AdaGN) U-Net architecture (per-layer modulation & direct 1-ch input)
-    - [ ] 28.12 Implement DiT (Diffusion Transformer) denoiser
+    - [x] 28.12 Implement DiT (Diffusion Transformer) denoiser
     - [ ] 28.13 Implement latent diffusion (VAE encoder → diffuse in latent space → decode)
 - [ ] 28b. RAG & Vector Databases
     - [ ] 28b.1 Implement similarity search functions (Cosine, Dot Product)

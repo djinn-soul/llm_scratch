@@ -18,11 +18,11 @@ pub mod denoising_cnn_5layers;
 pub mod denoising_cnn_ops;
 pub mod denoising_mlp;
 pub mod denoising_model;
+pub mod dit;
 pub mod sampling;
 pub mod scheduler;
 pub mod time_embedding;
 pub mod unet;
-// pub mod dit;
 
 #[cfg(test)]
 // Cross-module reverse-sampling regressions use a deliberately empty model.

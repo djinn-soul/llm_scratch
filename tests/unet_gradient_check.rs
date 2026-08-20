@@ -87,8 +87,8 @@ fn unet_backward_matches_finite_difference_through_attention_residual() -> Resul
         ("w_cond", 0usize),
         ("w2", 5),
         ("w3", 11),
-        ("attn_w_qkv", 3),  // Q region of fused weight
-        ("attn_w_qkv", 7),  // still in Q/K/V region
+        ("attn_w_qkv", 3), // Q region of fused weight
+        ("attn_w_qkv", 7), // still in Q/K/V region
     ];
 
     let eps = 2e-3f32;
@@ -194,4 +194,3 @@ fn unet_adagn_backward_matches_finite_difference() -> Result<()> {
 
     Ok(())
 }
-

@@ -89,11 +89,7 @@ impl SpatialSelfAttention {
     ///   3. Q, K gradients:    ∂L/∂Q = (∂L/∂S @ K) / √C,  ∂L/∂K = (Q @ ∂L/∂S^T) / √C
     ///   4. Weight gradient:   ∂L/∂W_qkv = [∂L/∂Q, ∂L/∂K, ∂L/∂V] @ X_seq^T
     ///   5. Input gradient:    ∂L/∂X_seq = W_qkv^T @ [∂L/∂Q, ∂L/∂K, ∂L/∂V]
-    pub fn backward(
-        &self,
-        intermediates: &[Tensor],
-        delta_y: &Tensor,
-    ) -> Result<(Tensor, Tensor)> {
+    pub fn backward(&self, intermediates: &[Tensor], delta_y: &Tensor) -> Result<(Tensor, Tensor)> {
         let b = delta_y.dim(0)?;
         let c = self.w_qkv.dim(1)?;
         let h = delta_y.dim(2)?;
@@ -131,10 +127,7 @@ impl SpatialSelfAttention {
             .transpose(0, 1)?
             .contiguous()?
             .reshape((3 * c, b * n))?;
-        let x_seq_2d = x_seq
-            .transpose(0, 1)?
-            .contiguous()?
-            .reshape((c, b * n))?;
+        let x_seq_2d = x_seq.transpose(0, 1)?.contiguous()?.reshape((c, b * n))?;
         let d_wqkv = delta_qkv_2d.matmul(&x_seq_2d.t()?)?; // [3C, C]
 
         // 5. Gradient w.r.t input x_seq

@@ -25,12 +25,10 @@ impl<B: Backend> PatchEmbed<B> {
     }
 
     pub fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 3> {
-        let [b, hidden_dim, gh, gw] = self.proj.forward(x).dims();
+        let feat = self.proj.forward(x);
+        let [b, hidden_dim, gh, gw] = feat.dims();
 
-        self.proj
-            .forward(x)
-            .reshape([b, hidden_dim, gh * gw])
-            .swap_dims(1, 2)
+        feat.reshape([b, hidden_dim, gh * gw]).swap_dims(1, 2)
     }
 }
 

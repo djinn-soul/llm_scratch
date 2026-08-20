@@ -94,7 +94,6 @@ pub fn manual_conv2d(
         x.clone()
     };
 
-
     // --- Im2Col Transformation ------------------------------------------------
     // Extract all kernel patches and concatenate them along the channel dimension.
     let mut slices = Vec::with_capacity(kh * kw);
