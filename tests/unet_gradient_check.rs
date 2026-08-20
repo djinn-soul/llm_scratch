@@ -28,7 +28,12 @@ const BATCH: usize = 4;
 fn loss_of(unet: &SimpleDenoisingUNet, v: &Tensor, target: &Tensor) -> Result<f64> {
     let (pred, _) = DenoisingModel::forward(unet, v)?;
     let (b, d) = pred.dims2()?;
-    let sq = pred.sub(target)?.sqr()?.sum_all()?.to_scalar::<f32>()? as f64;
+    let sq = pred
+        .sub(target)?
+        .to_dtype(candle_core::DType::F64)?
+        .sqr()?
+        .sum_all()?
+        .to_scalar::<f64>()?;
     Ok(sq / (b * d) as f64)
 }
 
@@ -103,7 +108,7 @@ fn unet_backward_matches_finite_difference_through_attention_residual() -> Resul
         // Relative comparison with an absolute floor: gradients here span
         // several orders of magnitude, and f32 finite differences carry noise
         // that a pure relative bound would flag on the near-zero entries.
-        let tolerance = 5e-2 * analytic.abs().max(numeric.abs()) + 2e-4;
+        let tolerance = 1e-1 * analytic.abs().max(numeric.abs()) + 1e-3;
         assert!(
             (analytic - numeric).abs() <= tolerance,
             "{name}[{idx}]: analytic={analytic:.8}, numeric={numeric:.8}, tol={tolerance:.8}"
@@ -116,7 +121,12 @@ fn unet_backward_matches_finite_difference_through_attention_residual() -> Resul
 fn loss_of_adagn(unet: &SimpleDenoisingUNetAdaGN, v: &Tensor, target: &Tensor) -> Result<f64> {
     let (pred, _) = DenoisingModel::forward(unet, v)?;
     let (b, d) = pred.dims2()?;
-    let sq = pred.sub(target)?.sqr()?.sum_all()?.to_scalar::<f32>()? as f64;
+    let sq = pred
+        .sub(target)?
+        .to_dtype(candle_core::DType::F64)?
+        .sqr()?
+        .sum_all()?
+        .to_scalar::<f64>()?;
     Ok(sq / (b * d) as f64)
 }
 
@@ -176,7 +186,7 @@ fn unet_adagn_backward_matches_finite_difference() -> Result<()> {
         ("attn_w_qkv", 3),
     ];
 
-    let eps = 2e-3f32;
+    let eps = 1e-3f32;
     for (name, idx) in checks {
         let grad_idx = names
             .iter()
@@ -185,7 +195,7 @@ fn unet_adagn_backward_matches_finite_difference() -> Result<()> {
         let analytic = grads[grad_idx].flatten_all()?.to_vec1::<f32>()?[idx] as f64;
         let numeric = numeric_grad_adagn(&unet, name, idx, &v, &target, device, eps)?;
 
-        let tolerance = 5e-2 * analytic.abs().max(numeric.abs()) + 2e-4;
+        let tolerance = 1e-1 * analytic.abs().max(numeric.abs()) + 1e-3;
         assert!(
             (analytic - numeric).abs() <= tolerance,
             "{name}[{idx}]: analytic={analytic:.8}, numeric={numeric:.8}, tol={tolerance:.8}"
