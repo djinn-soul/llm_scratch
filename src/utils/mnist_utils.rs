@@ -34,8 +34,11 @@ pub use super::image_io::save_png;
 // The MNIST image file is distributed as a GZIP-compressed IDX3-ubyte binary.
 // We download the compressed form and decompress it on-the-fly to disk.
 pub fn acquire_mnist_images(device: &Device) -> Result<Tensor> {
-    let dest_path = "mnist/MNIST/raw/train-images-idx3-ubyte";
-    let dest_dir = Path::new("mnist/MNIST/raw");
+    // let dest_path = "mnist/MNIST/raw/train-images-idx3-ubyte";
+    // let dest_dir = Path::new("mnist/MNIST/raw");
+
+    let dest_path = "fashion_mnist/raw/train-images-idx3-ubyte";
+    let dest_dir = Path::new("fashion_mnist/raw");
 
     if !Path::new(dest_path).exists() {
         println!("MNIST images not found locally. Downloading...");
@@ -46,7 +49,8 @@ pub fn acquire_mnist_images(device: &Device) -> Result<Tensor> {
         // Public GitHub mirror of the original MNIST files.
         // The original Yann LeCun server is rate-limited, so this mirror is
         // more reliable for automated training pipelines.
-        let url = "https://raw.githubusercontent.com/fgnt/mnist/master/train-images-idx3-ubyte.gz";
+        // let url = "https://raw.githubusercontent.com/fgnt/mnist/master/train-images-idx3-ubyte.gz";
+        let url = "https://raw.githubusercontent.com/zalandoresearch/fashion-mnist/master/data/fashion/train-images-idx3-ubyte.gz";
         println!("Downloading images from: {}", url);
 
         // Blocking HTTP GET — we don't need async I/O here.
@@ -82,14 +86,18 @@ pub fn acquire_mnist_images(device: &Device) -> Result<Tensor> {
 // Parallel to `acquire_mnist_images` but for the IDX1-ubyte label file.
 // Labels are needed by the class-conditioned model to build one-hot vectors.
 pub fn acquire_mnist_labels() -> Result<Vec<u8>> {
-    let dest_path = "mnist/MNIST/raw/train-labels-idx1-ubyte";
-    let dest_dir = Path::new("mnist/MNIST/raw");
+    // let dest_path = "mnist/MNIST/raw/train-labels-idx1-ubyte";
+    // let dest_dir = Path::new("mnist/MNIST/raw");
+
+    let dest_path = "fashion_mnist/raw/train-labels-idx1-ubyte";
+    let dest_dir = Path::new("fashion_mnist/raw");
 
     if !Path::new(dest_path).exists() {
         println!("MNIST labels not found locally. Downloading...");
         create_dir_all(dest_dir)?;
 
-        let url = "https://raw.githubusercontent.com/fgnt/mnist/master/train-labels-idx1-ubyte.gz";
+        // let url = "https://raw.githubusercontent.com/fgnt/mnist/master/train-labels-idx1-ubyte.gz";
+        let url = "https://raw.githubusercontent.com/zalandoresearch/fashion-mnist/master/data/fashion/train-labels-idx1-ubyte.gz";
         println!("Downloading labels from: {}", url);
 
         let response = reqwest::blocking::get(url)?;

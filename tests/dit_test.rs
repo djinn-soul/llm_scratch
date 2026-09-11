@@ -10,6 +10,10 @@ use llm_scratch_rs::models::diffusion::dit::{DiTConfig, DiffusionTransformer};
 type TestBackend = NdArray;
 type TestAutodiffBackend = Autodiff<NdArray>;
 
+/// Test 1: Verifies patch decomposition and invertible image reconstruction math.
+/// Ensures that:
+/// - `PatchEmbed` turns [B, 1, 28, 28] with patch_size=4 into [B, 49, hidden_dim].
+/// - `unpatchify` turns [B, 49, 16] back into [B, 1, 28, 28] with matching dimensions.
 #[test]
 fn test_patch_embed_and_unpatchify_shapes() {
     let device = Default::default();
@@ -45,6 +49,8 @@ fn test_patch_embed_and_unpatchify_shapes() {
     );
 }
 
+/// Test 2: Verifies a single DiTBlock forward pass.
+/// Checks that adaLN modulation, multi-head attention, and MLP preserve sequence dimension [B, N, D].
 #[test]
 fn test_dit_block_forward() {
     let device = Default::default();
@@ -65,6 +71,8 @@ fn test_dit_block_forward() {
     assert_eq!(out.dims(), [batch_size, num_tokens, hidden_dim]);
 }
 
+/// Test 3: Verifies end-to-end DiffusionTransformer forward shape.
+/// Ensures input noisy image [B, 1, 28, 28] yields predicted noise [B, 1, 28, 28].
 #[test]
 fn test_diffusion_transformer_forward_shape() {
     let device = Default::default();
@@ -91,6 +99,8 @@ fn test_diffusion_transformer_forward_shape() {
     assert_eq!(pred_noise.dims(), [batch_size, 1, 28, 28]);
 }
 
+/// Test 4: Verifies automatic differentiation and parameter update.
+/// Tests forward -> MSE loss -> backward -> optimizer step -> post-step inference.
 #[test]
 fn test_diffusion_transformer_autodiff_step() {
     let device = Default::default();
@@ -137,3 +147,4 @@ fn test_diffusion_transformer_autodiff_step() {
     let pred_new = updated_model.forward(x_t_new, t_emb_new, class_labels_new);
     assert_eq!(pred_new.dims(), [batch_size, 1, 28, 28]);
 }
+

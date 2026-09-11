@@ -30,7 +30,9 @@ mimalloc = "0.1.52"
 burn = { version = "0.21.0", default-features = false, features = ["std", "train", "ndarray", "wgpu"] }
 
 [features]
+cpu = []
 cuda = ["candle-core/cuda", "candle-nn/cuda"]
 mkl = ["candle-core/mkl", "candle-nn/mkl"]
 rocm = ["burn/rocm"]
 wgpu = ["burn/wgpu"]
+
