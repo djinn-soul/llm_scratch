@@ -6,6 +6,8 @@ use burn::tensor::backend::{AutodiffBackend, Backend};
 use burn::tensor::{Distribution, Tensor};
 use candle_core::Device as CandleDevice;
 use rand::RngExt;
+use burn::module::{ModuleMapper, ModuleVisitor, Param, ParamId};
+use std::collections::VecDeque;
 
 use llm_scratch_rs::models::diffusion::dit::DiTConfig;
 use llm_scratch_rs::models::diffusion::dit::DiffusionTransformer;
@@ -23,6 +25,13 @@ const FASHION_CLASSES: [&str; 10] = [
     "ankle_boot",
 ];
 
+/// Dynamic container to hold parameter tensors of different ranks (1D to 4D)
+pub enum AnyTensor<B: Backend> {
+    D1(Tensor<B, 1>),
+    D2(Tensor<B, 2>),
+    D3(Tensor<B, 3>),
+    D4(Tensor<B, 4>),
+}
 // ============================================================================
 // Backend Configuration (ROCm / WGPU / CPU)
 // ============================================================================
@@ -210,6 +219,34 @@ pub fn q_sample<B: Backend>(
             .reshape([b, 1, 1, 1]);
 
     x_0 * sqrt_alpha + noise * sqrt_one_minus_alpha
+}
+
+pub fn get_learning_rate(
+    step: usize,
+    total_steps: usize,
+    warmups_steps: usize,
+    lr_max: f64,
+    lr_min: f64,
+) -> f64 {
+    if step < warmups_steps {
+        // linear warmup
+        return lr_min + (lr_max - lr_min) * step as f64 / warmups_steps as f64;
+    } else if step > total_steps {
+        // decay to lr_min
+        return lr_min;
+    } else {
+        // cosine decay
+        return lr_min
+            + (lr_max - lr_min)
+                * ((total_steps - step) as f64 / (total_steps - warmups_steps) as f64).powf(1.0);
+    }
+}
+
+
+
+/// Visitor that collects live model parameter values into a queue
+pub struct ParamCollector<B: Backend> {
+    pub queue: VecDeque<AnyTensor<B>>,
 }
 
 /// Deterministic Denoising Diffusion Implicit Models (DDIM) Reverse Sampling.
@@ -424,9 +461,21 @@ pub fn main() -> anyhow::Result<()> {
         let t_emb =
             get_time_step_embeddings::<MyAutodiffBackend>(&timesteps, config.hidden_dim, &device);
 
-        // --- Step F: Optimization Step (Forward -> Loss -> Backward -> AdamW Step) ---
-        let (updated_model, loss_val) =
-            train_steps(model, x_t, noise, t_emb, class_labels, &mut optimizer, lr);
+        // --- Step F: Optimization Step with Warmup + Cosine Decay ---
+        let current_lr = get_learning_rate(
+            step, num_steps, 500,  /* warmup */
+            2e-4, /* max */
+            1e-5, /* min */
+        );
+        let (updated_model, loss_val) = train_steps(
+            model,
+            x_t,
+            noise,
+            t_emb,
+            class_labels,
+            &mut optimizer,
+            current_lr,
+        );
         model = updated_model;
 
         // Logging every 50 steps
