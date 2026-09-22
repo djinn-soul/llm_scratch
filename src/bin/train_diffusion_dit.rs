@@ -1,4 +1,5 @@
 use burn::module::{AutodiffModule, Module};
+use burn::module::{ModuleMapper, ModuleVisitor, Param};
 use burn::optim::AdamWConfig;
 use burn::optim::{GradientsParams, Optimizer};
 use burn::record::CompactRecorder;
@@ -6,7 +7,6 @@ use burn::tensor::backend::{AutodiffBackend, Backend};
 use burn::tensor::{Distribution, Tensor};
 use candle_core::Device as CandleDevice;
 use rand::RngExt;
-use burn::module::{ModuleMapper, ModuleVisitor, Param, ParamId};
 use std::collections::VecDeque;
 
 use llm_scratch_rs::models::diffusion::dit::DiTConfig;
@@ -25,7 +25,22 @@ const FASHION_CLASSES: [&str; 10] = [
     "ankle_boot",
 ];
 
-/// Dynamic container to hold parameter tensors of different ranks (1D to 4D)
+// ============================================================================
+// Heterogeneous Tensor Container for Module Traversal
+// ============================================================================
+
+/// Heterogeneous wrapper holding parameter tensors of varying dimensionality (1D to 4D).
+///
+/// ### Why is this needed?
+/// In Burn, tensor dimensionality `D` is a compile-time const generic (`Tensor<B, D>`).
+/// Neural network layers contain tensors of different ranks:
+/// - **1D**: Biases and normalization scale/shift vectors ($\beta, \gamma$)
+/// - **2D**: Linear projection weight matrices ($W_{\text{qkv}}, W_{\text{proj}}$)
+/// - **3D**: Positional embeddings or sequence representations
+/// - **4D**: Patch embedding convolution filters / spatial weights
+///
+/// To collect all parameters across the entire DiT model into a single ordered FIFO
+/// queue (`VecDeque`), we wrap them in this enum.
 pub enum AnyTensor<B: Backend> {
     D1(Tensor<B, 1>),
     D2(Tensor<B, 2>),
@@ -221,6 +236,24 @@ pub fn q_sample<B: Backend>(
     x_0 * sqrt_alpha + noise * sqrt_one_minus_alpha
 }
 
+// ============================================================================
+// Learning Rate Schedule: Linear Warmup + Cosine Decay
+// ============================================================================
+
+/// Calculates the learning rate for a given training step using Linear Warmup
+/// followed by Cosine Annealing decay.
+///
+/// ### Schedule Stages:
+/// 1. **Warmup Phase** (`step < warmup_steps`):
+///    Ramps learning rate linearly from `lr_min` to `lr_max`:
+///    $$\eta_t = \eta_{\min} + (\eta_{\max} - \eta_{\min}) \cdot \frac{t}{t_{\text{warmup}}}$$
+///    *Why*: Self-attention heads in Vision Transformers produce high-variance gradients early on;
+///    warming up prevents initial gradient spikes from destabilizing the weights.
+///
+/// 2. **Cosine Decay Phase** (`warmup_steps <= step <= total_steps`):
+///    Smoothly decays learning rate along a cosine curve down to `lr_min`:
+///    $$\eta_t = \eta_{\min} + \frac{1}{2}(\eta_{\max} - \eta_{\min}) \left(1 + \cos\left(\frac{t - t_{\text{warmup}}}{t_{\text{total}} - t_{\text{warmup}}} \cdot \pi\right)\right)$$
+///    *Why*: Anneals the step size smoothly into a flat local minimum without sharp drops.
 pub fn get_learning_rate(
     step: usize,
     total_steps: usize,
@@ -229,24 +262,132 @@ pub fn get_learning_rate(
     lr_min: f64,
 ) -> f64 {
     if step < warmups_steps {
-        // linear warmup
-        return lr_min + (lr_max - lr_min) * step as f64 / warmups_steps as f64;
+        // Stage 1: Linear warmup from lr_min to lr_max
+        lr_min + (lr_max - lr_min) * (step as f64 / warmups_steps.max(1) as f64)
     } else if step > total_steps {
-        // decay to lr_min
-        return lr_min;
+        // Post-training: maintain minimum floor rate
+        lr_min
     } else {
-        // cosine decay
-        return lr_min
-            + (lr_max - lr_min)
-                * ((total_steps - step) as f64 / (total_steps - warmups_steps) as f64).powf(1.0);
+        // Stage 2: Smooth cosine decay down to lr_min
+        let progress = (step - warmups_steps) as f64 / (total_steps - warmups_steps).max(1) as f64;
+        let progress = progress.clamp(0.0, 1.0);
+        lr_min + 0.5 * (lr_max - lr_min) * (1.0 + (std::f64::consts::PI * progress).cos())
     }
 }
 
+// ============================================================================
+// Exponential Moving Average (EMA) Weight Management
+// ============================================================================
+//
+// ### What is EMA?
+// In generative diffusion models, the live model weights oscillate from batch to batch
+// due to stochastic gradient noise. EMA maintains a "shadow" copy of the weights using
+// Polyak averaging:
+//
+//     θ_ema ← β · θ_ema + (1 - β) · θ_live   (typically β = 0.999)
+//
+// Sampling images with EMA weights produces significantly higher visual quality,
+// removes high-frequency speckle artifacts, and prevents mode collapse.
+//
+// ### Burn Implementation Architecture:
+// 1. `ParamCollector` (Visitor Pattern): Traverses `live_model` and stores copies of all
+//    parameter tensors into a FIFO queue (`VecDeque`).
+// 2. `EmaBlender` (Mapper Pattern): Traverses `ema_model` in the identical order, pops
+//    each live tensor, and blends it into the EMA tensor in-place.
+// ============================================================================
 
-
-/// Visitor that collects live model parameter values into a queue
+/// **Step 1: Visitor** that traverses all parameters in the live model and collects them
+/// into an ordered FIFO queue.
 pub struct ParamCollector<B: Backend> {
     pub queue: VecDeque<AnyTensor<B>>,
+}
+
+impl<B: Backend> ModuleVisitor<B> for ParamCollector<B> {
+    fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<B, D>>) {
+        // Extract a cloned tensor value (detached from autodiff graph)
+        let val = param.val();
+        let dims = val.dims();
+
+        // Wrap the tensor in AnyTensor to erase const-generic rank D into a homogeneous queue
+        match D {
+            1 => self.queue.push_back(AnyTensor::D1(val.reshape([dims[0]]))),
+            2 => self.queue.push_back(AnyTensor::D2(val.reshape([dims[0], dims[1]]))),
+            3 => self.queue.push_back(AnyTensor::D3(val.reshape([dims[0], dims[1], dims[2]]))),
+            4 => self.queue.push_back(AnyTensor::D4(val.reshape([dims[0], dims[1], dims[2], dims[3]]))),
+            _ => {}
+        }
+    }
+}
+
+/// **Step 2: Mapper** that traverses the shadow EMA model and updates each parameter:
+///
+///     θ_ema = (θ_ema * decay) + (θ_live * (1 - decay))
+pub struct EmaBlender<B: Backend> {
+    /// EMA smoothing factor β (e.g. 0.999). Keeps 99.9% of past weight history.
+    pub decay: f32,
+    /// FIFO queue containing live model parameters collected by `ParamCollector`.
+    pub live_queue: VecDeque<AnyTensor<B>>,
+}
+
+impl<B: Backend> ModuleMapper<B> for EmaBlender<B> {
+    fn map_float<const D: usize>(&mut self, param: Param<Tensor<B, D>>) -> Param<Tensor<B, D>> {
+        // Deconstruct the parameter into its ID, tensor data, and inner mapper state
+        let (id, ema_tensor, mapper) = param.consume();
+        let dims = ema_tensor.dims();
+
+        // Pop the corresponding live tensor from the front of the queue
+        if let Some(live_any) = self.live_queue.pop_front() {
+            // Apply the EMA blend formula for matching rank D:
+            // updated = ema * decay + live * (1 - decay)
+            let updated = match (D, live_any) {
+                (1, AnyTensor::D1(live)) => {
+                    ema_tensor * self.decay + live.reshape(dims) * (1.0 - self.decay)
+                }
+                (2, AnyTensor::D2(live)) => {
+                    ema_tensor * self.decay + live.reshape(dims) * (1.0 - self.decay)
+                }
+                (3, AnyTensor::D3(live)) => {
+                    ema_tensor * self.decay + live.reshape(dims) * (1.0 - self.decay)
+                }
+                (4, AnyTensor::D4(live)) => {
+                    ema_tensor * self.decay + live.reshape(dims) * (1.0 - self.decay)
+                }
+                _ => panic!("Shape/rank mismatch between live and EMA model parameter!"),
+            };
+            return Param::from_mapped_value(id, updated, mapper);
+        }
+
+        // Fallback: return unchanged if no matching parameter was found in queue
+        Param::from_mapped_value(id, ema_tensor, mapper)
+    }
+}
+
+/// Coordinates one EMA step: transfers live model weights to shadow EMA weights.
+///
+/// # Arguments
+/// * `ema_model` - Current shadow EMA model (consumed and transformed)
+/// * `live_model` - Active training model being optimized by AdamW
+/// * `decay` - EMA decay rate $\beta$ (e.g. 0.999)
+///
+/// # Returns
+/// The updated `DiffusionTransformer` with blended shadow weights.
+pub fn update_ema<B: Backend>(
+    ema_model: DiffusionTransformer<B>,
+    live_model: &DiffusionTransformer<B>,
+    decay: f32,
+) -> DiffusionTransformer<B> {
+    // 1. Extract all live parameter tensors into a queue
+    let mut collector = ParamCollector {
+        queue: VecDeque::new(),
+    };
+    live_model.visit(&mut collector);
+
+    // 2. Map and blend each parameter into the EMA shadow model
+    let mut blender = EmaBlender {
+        decay,
+        live_queue: collector.queue,
+    };
+    ema_model.map(&mut blender)
 }
 
 /// Deterministic Denoising Diffusion Implicit Models (DDIM) Reverse Sampling.
@@ -306,6 +447,47 @@ pub fn sample_ddim<B: Backend>(
     x
 }
 
+/// Stitches 10 28x28 images into a single 2x5 lookbook image and saves as PNG.
+pub fn save_lookbook_collage(path: &str, images: &[Vec<f32>]) -> anyhow::Result<()> {
+    if images.len() != 10 {
+        anyhow::bail!(
+            "Expected 10 images for a 2x5 lookbook, got {}",
+            images.len()
+        );
+    }
+    let rows = 2;
+    let cols = 5;
+    let side = 28;
+    let total_w = cols * side; // 140 pixels
+    let total_h = rows * side; // 56 pixels
+    let mut collage = vec![0.0f32; total_w * total_h];
+    for (k, img) in images.iter().enumerate() {
+        let r = k / cols; // Row: 0 or 1
+        let c = k % cols; // Col: 0..4
+        for y in 0..side {
+            for x in 0..side {
+                let dst_y = r * side + y;
+                let dst_x = c * side + x;
+                collage[dst_y * total_w + dst_x] = img[y * side + x];
+            }
+        }
+    }
+    // Convert from [-1, 1] to [0, 255]
+    let bytes: Vec<u8> = collage
+        .iter()
+        .map(|&v| (((v + 1.0) / 2.0).clamp(0.0, 1.0) * 255.0).round() as u8)
+        .collect();
+    llm_scratch_rs::utils::ensure_parent_dir(path)?;
+    let file = std::fs::File::create(path)?;
+    let writer = std::io::BufWriter::new(file);
+    let mut encoder = png::Encoder::new(writer, total_w as u32, total_h as u32);
+    encoder.set_color(png::ColorType::Grayscale);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header()?;
+    writer.write_image_data(&bytes)?;
+    println!("Saved lookbook collage to: {path}");
+    Ok(())
+}
 pub fn sample_ddim_with_cfg<B: Backend>(
     model: &DiffusionTransformer<B>,
     scheduler: &SimpleNoiseScheduler,
@@ -393,9 +575,13 @@ pub fn main() -> anyhow::Result<()> {
 
     let mut model: DiffusionTransformer<MyAutodiffBackend> =
         DiffusionTransformer::new(config.clone(), &device);
+
+    // Initialize EMA shadow model (inference backend without autodiff graph)
+    let mut ema_model: DiffusionTransformer<MyBackend> =
+        DiffusionTransformer::new(config.clone(), &device);
+
     let mut optimizer = AdamWConfig::new().init();
     let scheduler = SimpleNoiseScheduler::new_cosine(num_timesteps);
-    let lr = 2e-4;
 
     // 2. Load MNIST Dataset (60k images normalized to [-1, 1])
     println!("Loading MNIST dataset...");
@@ -478,6 +664,8 @@ pub fn main() -> anyhow::Result<()> {
         );
         model = updated_model;
 
+        // Step EMA weights with 0.999 decay rate
+        ema_model = update_ema(ema_model, &model.valid(), 0.999);
         // Logging every 50 steps
         if step % 50 == 0 || step == 1 {
             println!("Step {:5}/{}: MSE Loss = {:.6}", step, num_steps, loss_val);
@@ -489,12 +677,17 @@ pub fn main() -> anyhow::Result<()> {
             //     "\n>>> [Step {}/{}] Saving Model Tensors & Generating Digit Previews...",
             //     step, num_steps
             // );
+            // println!(
+            //     "\n>>> [Step {}/{}] Saving Model Tensors & Generating Fashion Previews...",
+            //     step, num_steps
+            // );
+
             println!(
-                "\n>>> [Step {}/{}] Saving Model Tensors & Generating Fashion Previews...",
+                "\n>>> [Step {}/{}] Generating EMA Lookbook & Saving Checkpoint...",
                 step, num_steps
             );
             // 1. Convert to validation mode for evaluation and saving
-            let valid_model = model.valid();
+            let valid_model = ema_model.clone();
 
             // 2. Save Model Tensor Weights (Compact format)
             // let checkpoint_path = format!("checkpoints/dit_mnist_step_{:05}", step);
@@ -512,30 +705,38 @@ pub fn main() -> anyhow::Result<()> {
                 );
             }
 
-            // 3. Generate preview digits (e.g. Digits 0, 3, 7, 9)
-            // let preview_digits = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+            // 3. Generate preview samples for all 10 fashion classes using EMA model
+            let mut class_samples = Vec::with_capacity(10);
             for class_id in 0..10 {
                 let sample = sample_ddim_with_cfg(
-                    &valid_model,      //model
-                    &scheduler,        //scheduler
-                    1,                 //batch size
-                    class_id,          //class label
-                    50,                //number of steps
-                    1.8,               //guidance scale
-                    config.hidden_dim, //hidden dimension
+                    &valid_model,
+                    &scheduler,
+                    1,
+                    class_id,
+                    50,
+                    1.8,
+                    config.hidden_dim,
                     &device,
                 );
                 let sample_pixels = sample.into_data().as_slice::<f32>().unwrap().to_vec();
-                // let filename = format!("samples/dit_step_{:05}_digit_{}.png", step, class_id);
+                class_samples.push(sample_pixels);
+            }
+
+            // 4. Save 2x5 stitched lookbook collage
+            let lookbook_path = format!("samples/dit_step_{:05}_lookbook.png", step);
+            if let Err(e) = save_lookbook_collage(&lookbook_path, &class_samples) {
+                eprintln!("Warning: Failed to save lookbook {}: {:?}", lookbook_path, e);
+            }
+
+            // 5. Also save individual class images
+            for (class_id, pixels) in class_samples.iter().enumerate() {
                 let filename = format!(
                     "samples/dit_step_{:05}_class_{}_{}.png",
                     step, class_id, FASHION_CLASSES[class_id]
                 );
-                if let Err(e) = save_png(&filename, &sample_pixels) {
-                    eprintln!("Warning: Failed to save {}: {:?}", filename, e);
-                }
+                let _ = save_png(&filename, pixels);
             }
-            println!("    Generated & saved digit samples (0-9) to samples/ directory.\n");
+            println!("    Generated lookbook collage & 10 class previews in samples/\n");
         }
     }
 
