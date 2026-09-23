@@ -21,10 +21,30 @@ remain understandable without needing to remember chapter numbers.
 - [BPE vs Unigram](#bpe-vs-unigram)
 - [Current Model Stack](#current-model-stack)
 - [Diffusion Samplers & Resampling CLI](#diffusion-samplers--resampling-cli)
+- [Diffusion Transformer (DiT) & Post-DiT Evolution](#diffusion-transformer-dit--post-dit-evolution)
+  - [Post-DiT Evolution Roadmap](#what-next-after-dit-post-dit-generative-roadmap)
 - [Roadmap](#roadmap)
 - [TODO](#todo)
+  - [1. Candle & PyTorch/HF Foundations](#1-candle--pytorchhf-foundations-modern-frameworks)
+  - [2. Model Architectures & Core Implementations](#2-model-architectures--core-implementations)
+  - [3. Fine-Tuning, PEFT, & Alignment](#3-fine-tuning-peft--alignment)
+  - [4. Reasoning & System 2 Thinking](#4-reasoning--system-2-thinking)
+  - [5. Efficiency & Optimization](#5-efficiency--optimization)
+  - [6. Vision, Generative & Other Domains](#6-vision-generative--other-domains)
+    - [28. Diffusion Models, DiT & Post-DiT Evolution](#28-diffusion-models-stable-diffusion)
+  - [7. Testing & Validation](#7-testing--validation)
+  - [8. Agentic Systems & Tool Use](#8-agentic-systems--tool-use)
 - [Next Step](#next-step)
 - [Dependencies](#dependencies)
+
+### Post-DiT Generative Roadmap
+
+| Direction | TODO Ref | Conceptual Leap | Reusability of Current Code | Primary Skill Gained |
+| :--- | :---: | :---: | :---: | :--- |
+| **1. Flow Matching (Rectified Flow)** | [TODO §28.14](#6-vision-generative--other-domains) | High | Very High (Reuses DiT) | SOTA trajectory math, straight-line ODEs, 10-step Euler sampling |
+| **2. Latent DiT (VAE + DiT)** | [TODO §28.13](#6-vision-generative--other-domains) | Medium | High | Two-stage training, latent compression, spatial downsampling |
+| **3. MMDiT (Text-to-Image)** | [TODO §28.15](#6-vision-generative--other-domains) | High | Medium | Cross-attention, multimodal conditioning, prompt embeddings |
+| **4. Consistency Models / Distillation** | [TODO §28.16](#6-vision-generative--other-domains) | Very High | High | Single-step inference, knowledge distillation |
 
 ## Status
 
@@ -229,6 +249,40 @@ The repository implements two high-performance U-Net architectures:
    * **Zero-Initialized Identity Start:** Projection weights initialize at $0$ so the network starts training at pure standard GroupNorm without gradient explosion.
    * **Analytical Backpropagation:** Hand-written analytical gradients verified against central-difference numerical differentiation (`tests/unet_gradient_check.rs`).
 
+### Diffusion Transformer (DiT) & Post-DiT Evolution
+
+The repository includes a modular, textbook-grade implementation of the **Class-Conditional Diffusion Transformer (DiT)** (Peebles & Xie, 2022) with Adaptive Layer Normalization (`adaLN-Zero`), non-overlapping 2D patchification, Polyak Exponential Moving Average (EMA) parameter tracking, Classifier-Free Guidance (CFG), and Latent Class Morphing.
+
+#### Runnable DiT Commands
+```bash
+# 1. Train DiT on Fashion-MNIST (automatically resumes from latest checkpoint in checkpoints/)
+cargo run --release --bin train_diffusion_dit -- auto
+
+# 2. CFG Guidance Sweep ("The Prompt Volume Knob") across scales s ∈ [0.0, 6.0]
+cargo run --release --bin sample_diffusion_dit -- --mode cfg --class 0
+
+# 3. Latent Class Morphing ("The Garment Blender") interpolating between apparel categories
+cargo run --release --bin sample_diffusion_dit -- --mode morph --from 0 --to 3
+```
+
+#### What Next After DiT? Post-DiT Generative Roadmap
+
+| Direction | Conceptual Leap | Reusability of Current Code | Primary Skill Gained |
+| :--- | :---: | :---: | :--- |
+| **1. Flow Matching (Rectified Flow)** | High | **Very High** (Reuses DiT) | SOTA trajectory math, straight-line ODEs, 10-step Euler sampling |
+| **2. Latent DiT (VAE + DiT)** | Medium | High | Two-stage training, latent compression, spatial downsampling |
+| **3. MMDiT (Text-to-Image)** | High | Medium | Cross-attention, multimodal conditioning, prompt embeddings |
+| **4. Consistency Models / Distillation** | Very High | High | Single-step inference, knowledge distillation |
+
+1. **Flow Matching / Rectified Flow (Stable Diffusion 3, Flux.1, Midjourney v6, OpenAI Sora)**:
+   Replaces curved Brownian diffusion paths with straight-line velocity vector fields ($x_t = (1 - t)x_0 + t x_1$). Directly reuses the existing DiT architecture with simplified 10-step Euler ODE numerical integration.
+2. **Latent DiT (VAE + DiT)**:
+   Compresses high-resolution inputs ($28 \times 28 \to 7 \times 7$) via a lightweight Variational Autoencoder, training the DiT in continuous latent space to overcome quadratic pixel attention scaling.
+3. **MMDiT (Multi-Modal Dual-Stream DiT)**:
+   Replaces discrete class indices with free-form text embeddings, running joint cross-attention between image patch tokens and text tokens.
+4. **Consistency Distillation**:
+   Distills the multistep sampling trajectory into a single-step or two-step real-time generative network.
+
 ## Roadmap
 
 - [x] Tokenizers
@@ -243,8 +297,25 @@ The repository implements two high-performance U-Net architectures:
 - [x] Loss and optimizer
 - [x] Tiny training loop
 - [x] Generation and sampling
+- [x] Diffusion Models (DDPM, DDIM, Cosine Schedule, DPM-Solver++, AdaGN U-Net)
+- [x] Class-Conditional Diffusion Transformer (DiT with adaLN-Zero, CFG & Latent Morphing)
+- [ ] Post-DiT: Flow Matching / Rectified Flow ([TODO §28.14](#6-vision-generative--other-domains))
+- [ ] Post-DiT: Latent DiT with VAE ([TODO §28.13](#6-vision-generative--other-domains))
+- [ ] Post-DiT: MMDiT Multi-Modal Text-to-Image ([TODO §28.15](#6-vision-generative--other-domains))
+- [ ] Post-DiT: Consistency Distillation ([TODO §28.16](#6-vision-generative--other-domains))
 
 ## TODO
+
+| Domain | Section | Key Topics & Milestones | Status |
+| :--- | :--- | :--- | :---: |
+| **1. Modern Frameworks** | [§1](#1-candle--pytorchhf-foundations-modern-frameworks) | Candle, autograd, KV cache, safetensors, quantization | `[ ]` |
+| **2. Core Architectures** | [§2](#2-model-architectures--core-implementations) | Transformers, BERT, LLaMA, RoPE, DeepSeek MLA, MoE, Mamba | `[/]` |
+| **3. Fine-Tuning & Alignment** | [§3](#3-fine-tuning-peft--alignment) | SFT, LoRA, PEFT, RLHF (PPO), DPO, KTO, ORPO | `[ ]` |
+| **4. System 2 Reasoning** | [§4](#4-reasoning--system-2-thinking) | Chain of Thought, MCTS, PRM, GRPO | `[ ]` |
+| **5. Efficiency & Optimization** | [§5](#5-efficiency--optimization) | FlashAttention, Speculative Decoding, PagedAttention, RTN | `[ ]` |
+| **6. Vision & Generative** | [§6](#6-vision-generative--other-domains) | ViT, VAE, GANs, DDPM, AdaGN U-Net, DiT, [Post-DiT Roadmap](#what-next-after-dit-post-dit-generative-roadmap) | `[/]` |
+| **7. Testing & Validation** | [§7](#7-testing--validation) | Unit math tests, gradient smoke tests, Candle parity | `[ ]` |
+| **8. Agentic Systems & Tool Use** | [§8](#8-agentic-systems--tool-use) | Tool calling, JSON/XML schemas, ReAct loop | `[ ]` |
 
 ### 1. Candle & PyTorch/HF Foundations (Modern Frameworks)
 - [ ] 1. Rebuild your mini GPT in Candle
@@ -396,6 +467,10 @@ The repository implements two high-performance U-Net architectures:
     - [x] 28.11c Implement Adaptive Group Normalization (AdaGN) U-Net architecture (per-layer modulation & direct 1-ch input)
     - [x] 28.12 Implement DiT (Diffusion Transformer) denoiser
     - [ ] 28.13 Implement latent diffusion (VAE encoder → diffuse in latent space → decode)
+    - [ ] 28.14 Implement Flow Matching / Rectified Flow (Euler ODE velocity fields & straight-line transport)
+    - [ ] 28.15 Implement MMDiT (Multi-Modal Dual-Stream DiT cross-attention for text-to-image)
+    - [ ] 28.16 Implement Consistency Models / Distillation (1–2 step real-time generation)
+
 - [ ] 28b. RAG & Vector Databases
     - [ ] 28b.1 Implement similarity search functions (Cosine, Dot Product)
     - [ ] 28b.2 Implement a basic HNSW (Hierarchical Navigable Small World) index builder

@@ -43,4 +43,3 @@ pub struct DiTConfig {
     #[config(default = 4.0)]
     pub mlp_ratio: f64,
 }
-

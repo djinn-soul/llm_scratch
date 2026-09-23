@@ -16,9 +16,18 @@ pub mod config;
 pub mod dit;
 pub mod dit_block;
 pub mod patch_embed;
+pub mod sampling;
+pub mod training;
 
 pub use config::DiTConfig;
 pub use dit::DiffusionTransformer;
 pub use dit_block::DiTBlock;
 pub use patch_embed::{unpatchify, PatchEmbed};
-
+pub use sampling::{
+    get_time_step_embeddings, sample_ddim_continuous, sample_ddim_with_cfg, save_filmstrip,
+    save_lookbook_collage, SimpleNoiseScheduler, FASHION_CLASSES,
+};
+pub use training::{
+    extract_step_from_path, find_latest_checkpoint, get_learning_rate, q_sample, train_steps,
+    update_ema, AnyTensor, EmaBlender, ParamCollector,
+};

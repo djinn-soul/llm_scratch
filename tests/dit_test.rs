@@ -147,4 +147,3 @@ fn test_diffusion_transformer_autodiff_step() {
     let pred_new = updated_model.forward(x_t_new, t_emb_new, class_labels_new);
     assert_eq!(pred_new.dims(), [batch_size, 1, 28, 28]);
 }
-

@@ -168,14 +168,80 @@ impl<B: Backend> DiffusionTransformer<B> {
     ///    - `x = LayerNorm(x) * (1 + gamma) + beta`
     ///    - Linearly project tokens to raw patch pixels `[B, N, p^2 * C]`
     ///    - Call `unpatchify` to permute and reshape patches back into the 4D image grid `[B, C, H, W]`.
+    /// Retrieves the continuous embedding vector for a given discrete class label.
     ///
-    /// # Arguments
-    /// * `x_t` - Noisy input image batch of shape `[Batch, Channels, Height, Width]`
-    /// * `t_emb` - Sinusoidal timestep embeddings of shape `[Batch, hidden_dim]`
-    /// * `class_labels` - Class integer indices of shape `[Batch]` (e.g., 0..9 for MNIST)
+    /// # Parameter Mechanics:
+    /// Queries the learned embedding lookup table of shape `[num_classes, hidden_dim]`.
+    /// Returns a continuous vector `[1, hidden_dim]` that can be manipulated via vector arithmetic
+    /// (e.g. linear blending $\mathbf{e} = (1-\lambda)\mathbf{e}_A + \lambda\mathbf{e}_B$ for Latent Class Morphing).
+    pub fn get_class_embedding(&self, class_id: usize, device: &B::Device) -> Tensor<B, 2> {
+        let label_tensor: Tensor<B, 1, burn::tensor::Int> =
+            Tensor::from_ints([class_id as i32], device);
+        self.class_embed
+            .forward(label_tensor.unsqueeze_dim(1))
+            .reshape([1, self.config.hidden_dim])
+    }
+
+    /// Executes the forward pass of DiT using an explicit continuous class condition vector `[B, D]`.
     ///
-    /// # Returns
-    /// Predicted noise tensor matching the input image shape `[Batch, Channels, Height, Width]`.
+    /// Accepts raw continuous vectors rather than integer IDs, directly supporting CFG extrapolation
+    /// and continuous latent morphing between multiple classes.
+    pub fn forward_with_cond_vec(
+        &self,
+        x_t: Tensor<B, 4>,
+        t_emb: Tensor<B, 2>,
+        c_cond: Tensor<B, 2>,
+    ) -> Tensor<B, 4> {
+        let [b, _c, _h, _w] = x_t.dims();
+        let d = self.config.hidden_dim;
+
+        // Step 1: Project sinusoidal Fourier timestep embeddings [B, D] through a 2-layer MLP.
+        // Linear -> ReLU -> Linear projects rigid mathematical frequencies into the semantic latent space.
+        let t_cond = self
+            .t_embed_fc2
+            .forward(Relu::new().forward(self.t_embed_fc1.forward(t_emb)));
+
+        // Step 1b: Merge time and class signals via element-wise addition [B, D].
+        // Both time and class condition the diffusion flow equally as a single joint anchor.
+        let cond = t_cond + c_cond;
+
+        // Step 2: Linearly project 2D image patches into 1D token sequences [B, N, D] via PatchEmbed.
+        // Self-attention is permutation-invariant (order-blind), so we add learned 1D spatial
+        // position embeddings pos_embed [1, N, D] so tokens retain spatial grid coordinates.
+        let mut x = self.patch_embed.forward(x_t) + self.pos_embed.val();
+
+        // Step 3: Pass tokens sequentially through the stack of L DiTBlocks.
+        // Each block internally modulates attention and MLP pathways using adaLN-Zero driven by cond [B, D].
+        for block in &self.dit_blocks {
+            x = block.forward(x, cond.clone());
+        }
+
+        // Step 4: Regress final adaptive LayerNorm modulation parameters [gamma, beta] from cond [B, D].
+        // Projects cond [B, D] -> [B, 1, 2D], then slices into multiplicative scale and additive shift.
+        let final_params = self.final_adaln.forward(cond).unsqueeze_dim(1);
+        let gamma = final_params.clone().slice([0..b, 0..1, 0..d]); // [B, 1, D]
+        let beta = final_params.slice([0..b, 0..1, d..2 * d]); // [B, 1, D]
+
+        // Step 4b: Apply adaptive LayerNorm: normalize token vectors across hidden_dim, scale by (1 + gamma)
+        // to preserve standard LayerNorm identity at gamma=0, and shift by beta.
+        x = self.final_norm.forward(x) * (gamma + 1.0) + beta;
+
+        // Step 5: Linearly project transformer tokens [B, N, D] to raw patch pixels [B, N, p^2 * C].
+        // For MNIST with patch_size=4 and C=1, each token expands into 16 raw scalar pixel values.
+        let x_patches = self.final_proj.forward(x);
+
+        // Step 5b: Invert patchification: reshape and permute tokens back into standard 2D spatial grid [B, C, H, W].
+        // The output matches the exact shape of input x_t and represents predicted noise epsilon_hat.
+        unpatchify(
+            x_patches,
+            self.config.in_channels,
+            self.config.img_size,
+            self.config.img_size,
+            self.config.patch_size,
+        )
+    }
+
+    /// Executes the standard forward pass of DiT by mapping discrete class IDs to embeddings.
     pub fn forward(
         &self,
         x_t: Tensor<B, 4>,
@@ -185,68 +251,12 @@ impl<B: Backend> DiffusionTransformer<B> {
         let [b, _c, _h, _w] = x_t.dims();
         let d = self.config.hidden_dim;
 
-        // --------------------------------------------------------------------
-        // Step 1: Compute Conditioning Vector: cond = MLP(t) + ClassEmbedding(c)
-        // --------------------------------------------------------------------
-        // Pass sinusoidal time embedding through 2-layer MLP with ReLU:
-        // Input: [B, D] -> FC1: [B, D] -> ReLU -> FC2: [B, D]
-        let t_cond = self
-            .t_embed_fc2
-            .forward(Relu::new().forward(self.t_embed_fc1.forward(t_emb)));
-
-        // Look up class label embeddings:
-        // class_labels: [B] -> unsqueeze_dim(1): [B, 1] -> class_embed: [B, 1, D] -> reshape: [B, D]
+        // Look up class label embeddings: [B] -> [B, 1, D] -> [B, D]
         let c_cond = self
             .class_embed
             .forward(class_labels.unsqueeze_dim(1))
             .reshape([b, d]);
 
-        // Element-wise sum of timestep and class representations: Shape: [B, D]
-        let cond = t_cond + c_cond;
-
-        // --------------------------------------------------------------------
-        // Step 2: Patchify Image + Add Learnable Positional Embeddings
-        // --------------------------------------------------------------------
-        // x_t [B, C, H, W] -> PatchEmbed -> [B, N, D]
-        // self.pos_embed.val() is [1, N, D], automatically broadcast across batch B
-        let mut x = self.patch_embed.forward(x_t) + self.pos_embed.val();
-
-        // --------------------------------------------------------------------
-        // Step 3: Pass Tokens Through Stack of DiT Transformer Blocks
-        // --------------------------------------------------------------------
-        // Each block performs:
-        // 1. Modulated Self-Attention with adaptive scale/shift/gate (gamma1, beta1, alpha1)
-        // 2. Modulated Feed-Forward MLP with adaptive scale/shift/gate (gamma2, beta2, alpha2)
-        for block in &self.dit_blocks {
-            x = block.forward(x, cond.clone());
-        }
-
-        // --------------------------------------------------------------------
-        // Step 4: Final LayerNorm + adaLN Scale/Shift Modulation
-        // --------------------------------------------------------------------
-        // Linearly project conditioning vector [B, D] -> [B, 2 * D] and unsqueeze to [B, 1, 2 * D]
-        let final_params = self.final_adaln.forward(cond).unsqueeze_dim(1);
-        // Slice scale (gamma) and shift (beta) chunks: each [B, 1, D]
-        let gamma = final_params.clone().slice([0..b, 0..1, 0..d]);
-        let beta = final_params.slice([0..b, 0..1, d..2 * d]);
-
-        // Apply LayerNorm, then modulate: LayerNorm(x) * (1 + gamma) + beta
-        x = self.final_norm.forward(x);
-        x = x * (gamma + 1.0) + beta;
-
-        // --------------------------------------------------------------------
-        // Step 5: Linear Projection to Raw Patch Pixels & Unpatchify to Image
-        // --------------------------------------------------------------------
-        // Project hidden dimension D to flat patch pixels (p * p * C): [B, N, D] -> [B, N, p^2 * C]
-        let x_patches = self.final_proj.forward(x);
-
-        // Reconstruct 2D spatial image tensor from sequence tokens: [B, N, p^2 * C] -> [B, C, H, W]
-        unpatchify(
-            x_patches,
-            self.config.in_channels,
-            self.config.img_size,
-            self.config.img_size,
-            self.config.patch_size,
-        )
+        self.forward_with_cond_vec(x_t, t_emb, c_cond)
     }
 }

@@ -143,12 +143,12 @@ impl<B: Backend> DiTBlock<B> {
         let mod_params = self.ada_ln.forward(cond).unsqueeze_dim(1);
 
         // Slice the 6 parameters along dimension 2 (channels):
-        let gamma1 = mod_params.clone().slice([0..b, 0..1, 0..d]);         // Attention scale: [B, 1, D]
-        let beta1  = mod_params.clone().slice([0..b, 0..1, d..d * 2]);       // Attention shift: [B, 1, D]
-        let alpha1 = mod_params.clone().slice([0..b, 0..1, d * 2..d * 3]);  // Attention gate:  [B, 1, D]
-        let gamma2 = mod_params.clone().slice([0..b, 0..1, d * 3..d * 4]);  // MLP scale:        [B, 1, D]
-        let beta2  = mod_params.clone().slice([0..b, 0..1, d * 4..d * 5]);   // MLP shift:        [B, 1, D]
-        let alpha2 = mod_params.clone().slice([0..b, 0..1, d * 5..d * 6]);  // MLP gate:         [B, 1, D]
+        let gamma1 = mod_params.clone().slice([0..b, 0..1, 0..d]); // Attention scale: [B, 1, D]
+        let beta1 = mod_params.clone().slice([0..b, 0..1, d..d * 2]); // Attention shift: [B, 1, D]
+        let alpha1 = mod_params.clone().slice([0..b, 0..1, d * 2..d * 3]); // Attention gate:  [B, 1, D]
+        let gamma2 = mod_params.clone().slice([0..b, 0..1, d * 3..d * 4]); // MLP scale:        [B, 1, D]
+        let beta2 = mod_params.clone().slice([0..b, 0..1, d * 4..d * 5]); // MLP shift:        [B, 1, D]
+        let alpha2 = mod_params.clone().slice([0..b, 0..1, d * 5..d * 6]); // MLP gate:         [B, 1, D]
 
         // --------------------------------------------------------------------
         // Step 2: Modulated Multi-Head Self-Attention Sub-Layer
@@ -181,10 +181,6 @@ impl<B: Backend> DiTBlock<B> {
             .forward(self.mlp_act.forward(self.mlp_fc1.forward(x_mod2)));
 
         // 3d. Residual connection gated by alpha2: x = x + alpha2 * mlp_out
-        let x = x + mlp_out * alpha2;
-
-        x
+        x + mlp_out * alpha2
     }
 }
-
-

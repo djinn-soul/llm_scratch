@@ -1,7 +1,7 @@
 use burn::module::Module;
 use burn::nn::{conv::Conv2d, conv::Conv2dConfig, PaddingConfig2d};
-use burn::Tensor;
 use burn::tensor::backend::Backend;
+use burn::Tensor;
 
 /// 2D Image Patch Embedding layer.
 ///
@@ -114,5 +114,3 @@ pub fn unpatchify<B: Backend>(
         .swap_dims(3, 4)
         .reshape([b, channels, h, w])
 }
-
-
