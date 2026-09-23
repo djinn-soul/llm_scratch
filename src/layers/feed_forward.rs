@@ -60,7 +60,7 @@ impl FeedForward {
         // Each token row: [d_model] @ w_1[d_model][d_ff] → [d_ff]
         // Applied to every row at once via matmul → [seq_len][d_ff]
         // No mixing between tokens — every row is independent.
-        let hidden = matmul(&x.to_vec(), &self.w_1.data);
+        let hidden = matmul(x, &self.w_1.data);
         self.cache_hidden = hidden.clone();
         // ── STEP 2: RELU ────────────────────────────────────────────────────
         // ReLU(x) = max(0, x) — element-wise, no weights involved.
@@ -87,6 +87,7 @@ impl FeedForward {
     // The forward pass cached both the pre-ReLU hidden values and the
     // post-ReLU activated values. Backward needs both: activated values train
     // w_2, while pre-ReLU hidden values decide where ReLU passes gradient.
+    #[allow(clippy::needless_range_loop)]
     pub fn backward(&mut self, d_out: &[Vec<f32>]) -> Vec<Vec<f32>> {
         // ── BACKWARD: REVERSE FORWARD STEP 3 (SHRINK) ──────────────────────
         // Forward STEP 3 did:
@@ -104,9 +105,9 @@ impl FeedForward {
         //   d_out       [seq_len][d_model]
         //   d_w2        [d_ff][d_model]
         let activated_t = mat_transpose(&self.cache_activated);
-        let batch_d_w2 = matmul(&activated_t, &d_out.to_vec());
+        let batch_d_w2 = matmul(&activated_t, d_out);
         let w_2_t = mat_transpose(&self.w_2.data);
-        let d_activated = matmul(&d_out.to_vec(), &w_2_t);
+        let d_activated = matmul(d_out, &w_2_t);
         for i in 0..self.d_ff {
             for j in 0..self.d_model {
                 self.w_2.grad[i][j] += batch_d_w2[i][j];

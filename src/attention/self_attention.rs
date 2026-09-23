@@ -100,6 +100,8 @@ use crate::common::activation::softmax;
 use crate::common::param::Param;
 use crate::common::util::{mat_transpose, matmul, random_matrix};
 
+pub type KvCache = (Vec<Vec<f32>>, Vec<Vec<f32>>);
+
 // w_q / w_k / w_v: learned projection matrices, shape [d_model][d_k or d_v]
 // d_model: width of each input token vector (e.g. 64)
 // d_k:     width of query/key vectors — controls score-space dimension
@@ -124,7 +126,7 @@ pub struct SelfAttention {
     // head. It is inference-only state: training/backward still uses the normal
     // per-forward caches above.
     pub use_cache: bool,
-    pub cache_kv: Option<(Vec<Vec<f32>>, Vec<Vec<f32>>)>, // (cached_K, cached_V)
+    pub cache_kv: Option<KvCache>, // (cached_K, cached_V)
 }
 
 impl SelfAttention {
@@ -157,9 +159,9 @@ impl SelfAttention {
         //   q[i] = "what is token i looking for?"
         //   k[i] = "what does token i offer?"
         //   v[i] = "what does token i actually carry?"
-        let q = matmul(&x.to_vec(), &self.w_q.data);
-        let mut k = matmul(&x.to_vec(), &self.w_k.data);
-        let mut v = matmul(&x.to_vec(), &self.w_v.data);
+        let q = matmul(x, &self.w_q.data);
+        let mut k = matmul(x, &self.w_k.data);
+        let mut v = matmul(x, &self.w_v.data);
 
         // ── KV-CACHE APPEND ────────────────────────────────────────────────
         // Non-cached attention receives the whole sequence every time:
@@ -320,6 +322,7 @@ impl SelfAttention {
     // Every cached value below came from the most recent forward() call. That
     // matters because backprop needs the exact Q/K/V and attention weights that
     // produced the current output, not freshly recomputed or random values.
+    #[allow(clippy::needless_range_loop)]
     pub fn backward(&mut self, d_out: &[Vec<f32>]) -> Vec<Vec<f32>> {
         // ── BACKWARD: REVERSE FORWARD STEP 5 (BLEND) ───────────────────────
         // Forward STEP 5 did:
@@ -339,9 +342,9 @@ impl SelfAttention {
         //   d_attention_w      [seq_len][seq_len]
         //   d_v                [seq_len][d_v]
         let v_t = mat_transpose(&self.cache_v);
-        let d_attention_w = matmul(&d_out.to_vec(), &v_t);
+        let d_attention_w = matmul(d_out, &v_t);
         let a_t = mat_transpose(&self.cache_attention_weights);
-        let d_v = matmul(&a_t, &d_out.to_vec());
+        let d_v = matmul(&a_t, d_out);
 
         let seq_len = d_out.len();
         let mut d_scaled = vec![vec![0.0; seq_len]; seq_len];

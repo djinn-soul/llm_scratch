@@ -7,7 +7,7 @@ use crate::common::activation::softmax;
 ///
 /// Loss = -∑ y(i) * log(p(i))  where y(i) is 1 if the target token is i else 0 and p(i) is the probability of token i. For all i.
 /// Returns a single f32 scalar representing the average loss across the sequence.
-pub fn cross_entropy_loss(logits: &Vec<Vec<f32>>, targets: &Vec<usize>) -> f32 {
+pub fn cross_entropy_loss(logits: &[Vec<f32>], targets: &[usize]) -> f32 {
     assert_eq!(
         logits.len(),
         targets.len(),
@@ -49,8 +49,7 @@ pub fn cross_entropy_loss(logits: &Vec<Vec<f32>>, targets: &Vec<usize>) -> f32 {
 /// Returns:
 /// d_logits -> gradient for each logit
 /// Shape: [seq_len][vocab_size]
-
-pub fn cross_entropy_backward(logits: &Vec<Vec<f32>>, targets: &Vec<usize>) -> Vec<Vec<f32>> {
+pub fn cross_entropy_backward(logits: &[Vec<f32>], targets: &[usize]) -> Vec<Vec<f32>> {
     let seq_len = logits.len();
     let mut d_logits: Vec<Vec<f32>> = Vec::with_capacity(seq_len);
     for i in 0..seq_len {
@@ -82,7 +81,7 @@ pub fn cross_entropy_backward(logits: &Vec<Vec<f32>>, targets: &Vec<usize>) -> V
         //
         // Normalize gradients by sequence length
         for j in 0..d_logits[i].len() {
-            d_logits[i][j] = d_logits[i][j] / seq_len as f32;
+            d_logits[i][j] /= seq_len as f32;
         }
     }
     d_logits

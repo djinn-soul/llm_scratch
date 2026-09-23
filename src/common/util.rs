@@ -47,7 +47,8 @@ pub fn add_mat(a: &[Vec<f32>], b: &[Vec<f32>]) -> Vec<Vec<f32>> {
 // Matrix multiply: a[m][n] @ b[n][p] = result[m][p]
 // Triple nested loop — O(m*n*p). Slow but clear.
 //   result[i][j] = Σ_k a[i][k] * b[k][j]
-pub fn matmul(a: &Vec<Vec<f32>>, b: &Vec<Vec<f32>>) -> Vec<Vec<f32>> {
+#[allow(clippy::needless_range_loop)]
+pub fn matmul(a: &[Vec<f32>], b: &[Vec<f32>]) -> Vec<Vec<f32>> {
     // STEP 1: output has one row for every row in `a`.
     // For every row i in a:
     //   compute all p output columns.
@@ -78,7 +79,8 @@ pub fn matmul(a: &Vec<Vec<f32>>, b: &Vec<Vec<f32>>) -> Vec<Vec<f32>> {
 
 // Transpose: flip rows and columns. [rows][cols] → [cols][rows]
 // transposed[i][j] = matrix[j][i]. Needed to compute Q @ K^T.
-pub fn mat_transpose(matrix: &Vec<Vec<f32>>) -> Vec<Vec<f32>> {
+#[allow(clippy::needless_range_loop)]
+pub fn mat_transpose(matrix: &[Vec<f32>]) -> Vec<Vec<f32>> {
     // Example:
     //   [[1, 2, 3],
     //    [4, 5, 6]]

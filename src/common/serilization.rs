@@ -89,7 +89,7 @@ pub trait SaveableModel {
                 weights.len(),
                 "Weight matrices count mismatch!"
             );
-            for (param, weight) in params.iter_mut().zip(weights.into_iter()) {
+            for (param, weight) in params.iter_mut().zip(weights) {
                 assert_eq!(
                     param.data.len(),
                     weight.len(),

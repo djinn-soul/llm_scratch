@@ -106,6 +106,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 //   time_emb_dim   — 16 (sinusoidal embedding dimension)
 //   filename       — output PNG file path
 //   device         — CPU or GPU
+#[allow(clippy::too_many_arguments)]
 fn save_cfg_sample(
     model: &dyn DenoisingModel,
     scheduler: &BetaScheduler,

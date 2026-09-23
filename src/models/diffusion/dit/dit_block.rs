@@ -132,7 +132,6 @@ impl<B: Backend> DiTBlock<B> {
     ///
     /// # Returns
     /// Modulated output sequence tensor of shape `[Batch, Num_Patches, hidden_dim]`
-
     pub fn forward(&self, x: Tensor<B, 3>, cond: Tensor<B, 2>) -> Tensor<B, 3> {
         let [b, _n, d] = x.dims();
 

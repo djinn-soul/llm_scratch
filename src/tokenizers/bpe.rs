@@ -24,6 +24,12 @@ pub struct MergeEntry {
     pub new_id: usize,
 }
 
+impl Default for BytePair {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BytePair {
     pub fn new() -> Self {
         Self {
@@ -35,7 +41,7 @@ impl BytePair {
     }
 
     // Count adjacent token pairs and return the most/least frequent one
-    pub fn find_freq_pair(&self, tokens: &Vec<usize>, mode: &str) -> Option<(usize, usize)> {
+    pub fn find_freq_pair(&self, tokens: &[usize], mode: &str) -> Option<(usize, usize)> {
         let mut pair_count: HashMap<(usize, usize), usize> = HashMap::new();
         for t in tokens.windows(2) {
             *pair_count.entry((t[0], t[1])).or_insert(0) += 1;
@@ -59,7 +65,7 @@ impl BytePair {
     // Replace every occurrence of pair_id in tokens with new_pair_id
     pub fn replace_pair(
         &mut self,
-        tokens: &mut Vec<usize>,
+        tokens: &[usize],
         pair_id: &(usize, usize),
         new_pair_id: usize,
     ) -> Vec<usize> {
@@ -153,7 +159,7 @@ impl BytePair {
         // BPE training loop: repeatedly merge most frequent pair until vocab_size reached
         for new_id in self.vocab.len()..vocab_size {
             if let Some(pair) = self.find_freq_pair(&token_ids, "most") {
-                token_ids = self.replace_pair(&mut token_ids, &pair, new_id);
+                token_ids = self.replace_pair(&token_ids, &pair, new_id);
                 self.bpe_merges.insert(pair, new_id);
             } else {
                 break;
@@ -329,11 +335,11 @@ impl BytePair {
             let words = tok.split(" ");
             for (id_x, word) in words.enumerate() {
                 if id_x == 0 && id > 0 {
-                    tokens.push(format!("Ġ{}", &word));
+                    tokens.push(format!("Ġ{}", word));
                 } else if id_x == 0 {
                     tokens.push(word.to_string());
                 } else {
-                    tokens.push(format!("Ġ{}", &word));
+                    tokens.push(format!("Ġ{}", word));
                 }
             }
         }
@@ -405,7 +411,7 @@ impl BytePair {
                     let pair: (usize, usize) = (tokens[i], tokens[i + 1]);
                     if self.bpe_merges.contains_key(&pair) {
                         // Pair found in merge table → replace both with merged id
-                        let merge_token: usize = self.bpe_merges.get(&pair).unwrap().clone();
+                        let merge_token: usize = *self.bpe_merges.get(&pair).unwrap();
                         new_tokens.push(merge_token);
                         i += 2; // skip both tokens (they became one)
                         can_merge = true; // signal: run another pass
@@ -504,7 +510,7 @@ impl BytePair {
             })
             .collect::<Result<_, _>>()?;
 
-        return Ok(merged_ids);
+        Ok(merged_ids)
     }
 
     pub fn decode(&self, token_ids: Vec<usize>) -> Result<String, String> {
@@ -515,8 +521,8 @@ impl BytePair {
                 .get(id)
                 .ok_or_else(|| format!("unknown id: {id}"))?;
             if token == "\n" {
-                if !decoded.ends_with(" ") && decoded.len() > 0 {
-                    decoded.push_str(" ");
+                if !decoded.ends_with(" ") && !decoded.is_empty() {
+                    decoded.push(' ');
                 }
             } else {
                 decoded.push_str(token);

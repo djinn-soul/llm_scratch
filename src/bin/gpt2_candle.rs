@@ -62,11 +62,7 @@ fn main() -> Result<()> {
     // this binary keeps the full matrix path easy to inspect.
     for _ in 0..30 {
         let seq_len = input_tokens.len();
-        let start_idx = if seq_len > cfg.n_positions {
-            seq_len - cfg.n_positions
-        } else {
-            0
-        };
+        let start_idx = seq_len.saturating_sub(cfg.n_positions);
         let context_tokens = &input_tokens[start_idx..];
         let tokens_tensor = Tensor::new(context_tokens, &device)?;
         let logits = model.forward(&tokens_tensor)?;

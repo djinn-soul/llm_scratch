@@ -130,18 +130,16 @@ impl LayerNorm {
     //
     // Final per-token formula:
     //   d_x = (d_xhat - mean(d_xhat) - x_hat * mean(d_xhat * x_hat)) / std
-    pub fn backward(&mut self, d_out: &Vec<Vec<f32>>) -> Vec<Vec<f32>> {
+    pub fn backward(&mut self, d_out: &[Vec<f32>]) -> Vec<Vec<f32>> {
         let n = self.gamma.data[0].len() as f32;
         let mut d_x: Vec<Vec<f32>> = Vec::with_capacity(d_out.len());
 
         // These gradients belong to this backward call. Reset before summing
         // contributions from every token row in the sequence.
-        for j in 0..self.gamma.data[0].len() {
-            self.d_gamma[j] = 0.0;
-            self.d_beta[j] = 0.0;
-        }
+        self.d_gamma.fill(0.0);
+        self.d_beta.fill(0.0);
 
-        for i in 0..d_out.len() {
+        for (i, d_out_row) in d_out.iter().enumerate() {
             let x_hat = &self.cache_x_hat[i];
             let std_dev = self.cache_std[i];
 
@@ -158,9 +156,9 @@ impl LayerNorm {
             //   d_xhat   = d_out * gamma
             for j in 0..self.gamma.data[0].len() {
                 // dL/d_gamma
-                self.d_gamma[j] += d_out[i][j] * x_hat[j];
+                self.d_gamma[j] += d_out_row[j] * x_hat[j];
                 // dL/d_beta
-                self.d_beta[j] += d_out[i][j];
+                self.d_beta[j] += d_out_row[j];
             }
             let mut d_xhat = vec![0.0; self.gamma.data[0].len()];
             for j in 0..self.gamma.data[0].len() {

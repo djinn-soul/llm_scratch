@@ -43,7 +43,7 @@ fn main() {
     // The tokenizer is trained locally so vocab size stays tiny and matches the
     // miniature GPT model below.
     let url = "https://raw.githubusercontent.com/rasbt/LLMs-from-scratch/main/ch02/01_main-chapter-code/the-verdict.txt";
-    let _ = download_file_if_not_present(url, "./the-verdict.txt");
+    download_file_if_not_present(url, "./the-verdict.txt");
 
     let text = fs::read_to_string("./the-verdict.txt").expect("Failed to read file");
     println!("BytePair initialized successfully!");

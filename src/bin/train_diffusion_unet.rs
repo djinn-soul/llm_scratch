@@ -29,6 +29,7 @@ const SAMPLING_START_TIMESTEP: usize = 99;
 // =============================================================================
 // save_cfg_sample — helper: generate one image at a given guidance scale
 // =============================================================================
+#[allow(clippy::too_many_arguments)]
 fn save_cfg_sample(
     model: &dyn DenoisingModel,
     scheduler: &BetaScheduler,
@@ -60,6 +61,7 @@ fn save_cfg_sample(
 // =============================================================================
 // save_cfg_sample_frames — helper: save all 100 frames during reverse sampling
 // =============================================================================
+#[allow(clippy::too_many_arguments)]
 fn save_cfg_sample_frames(
     model: &dyn DenoisingModel,
     scheduler: &BetaScheduler,
@@ -142,6 +144,7 @@ fn save_reconstruction_diagnostics(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn save_fixed_noise_checkpoint(
     model: &dyn DenoisingModel,
     scheduler: &BetaScheduler,

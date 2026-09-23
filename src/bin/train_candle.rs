@@ -84,7 +84,7 @@ pub fn main() -> Result<()> {
     // Keep this comparable to the manual training binary:
     // both learn from the same `the-verdict.txt` slice and use a 1000-token BPE.
     let url = "https://raw.githubusercontent.com/rasbt/LLMs-from-scratch/main/ch02/01_main-chapter-code/the-verdict.txt";
-    let _ = download_file_if_not_present(url, "./the-verdict.txt");
+    download_file_if_not_present(url, "./the-verdict.txt");
     let text = std::fs::read_to_string("./the-verdict.txt").expect("Failed to read file");
 
     // 2. Train BPE tokenizer matching the miniature vocab size
@@ -119,8 +119,8 @@ pub fn main() -> Result<()> {
     let scheduler = LRScheduler::CosineWarmup {
         max_lr: max_lr as f32,
         min_lr: 1e-5,
-        warmup_steps: warmup_steps,
-        total_steps: total_steps,
+        warmup_steps,
+        total_steps,
     };
 
     // 7. Evaluate and print initial loss before training
@@ -222,11 +222,7 @@ pub fn main() -> Result<()> {
     for _ in 0..12 {
         // Keep only the context window the position embedding table can handle.
         let seq_len = input_tokens.len();
-        let start_idx = if seq_len > cfg.n_positions {
-            seq_len - cfg.n_positions
-        } else {
-            0
-        };
+        let start_idx = seq_len.saturating_sub(cfg.n_positions);
         let context_tokens = &input_tokens[start_idx..];
         let inputs_u32: Vec<u32> = context_tokens.iter().map(|&x| x as u32).collect();
         let inputs_t = Tensor::new(inputs_u32.as_slice(), &device)?;

@@ -101,7 +101,7 @@ impl Transformer {
 
         // STEP 3: merge gradients for the intermediate residual stream `h`.
         // d_h = d_output from the residual branch + d_h_from_norm2 from MLP.
-        let d_h = add_mat(&d_output.to_vec(), &d_h_from_norm2);
+        let d_h = add_mat(d_output, &d_h_from_norm2);
 
         // STEP 4: reverse the first residual add and attention branch.
         // h = x + attention, so d_h flows into attention and the direct x path.

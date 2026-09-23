@@ -44,7 +44,7 @@ impl MultiHeadAttention {
     pub fn new(d_model: usize, num_heads: usize) -> Self {
         // d_model must split evenly across heads, else concat won't line up
         assert!(
-            d_model % num_heads == 0,
+            d_model.is_multiple_of(num_heads),
             "d_model must be divisible by num_heads"
         );
         let d_k = d_model / num_heads;
@@ -120,6 +120,7 @@ impl MultiHeadAttention {
     //
     // Still todo because forward() must cache the concatenated head output and
     // this struct must own d_w_o before the output projection can train.
+    #[allow(clippy::needless_range_loop)]
     pub fn backward(&mut self, d_out: &[Vec<f32>]) -> Vec<Vec<f32>> {
         let seq_len = d_out.len();
         let d_v = self.d_model / self.num_heads;
@@ -130,7 +131,7 @@ impl MultiHeadAttention {
         // ── STEP 1: COMPUTE d_w_o and d_concatenated_heads ─────────────────
         // Step 1: d_w_o <- concat_t @ d_out
         let concat_t = mat_transpose(&concatenated);
-        let batch_w_o = matmul(&concat_t, &d_out.to_vec());
+        let batch_w_o = matmul(&concat_t, d_out);
 
         // accumalate gradients into self.d_w_o
         for i in 0..total_concat_dim {
@@ -140,7 +141,7 @@ impl MultiHeadAttention {
         }
 
         let w_o_t = mat_transpose(&self.w_o.data);
-        let d_concatenated = matmul(&d_out.to_vec(), &w_o_t);
+        let d_concatenated = matmul(d_out, &w_o_t);
         let mut d_x = vec![vec![0.0; self.d_model]; seq_len];
 
         for h in 0..self.num_heads {

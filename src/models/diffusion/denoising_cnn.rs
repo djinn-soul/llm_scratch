@@ -119,11 +119,11 @@ impl DenoisingModel for SimpleDenoisingCNN {
         let input_cat = Tensor::cat(&[&xt_img, &cond_map], 1)?;
 
         // Conv1 + Leaky-ReLU
-        let z1 = manual_conv2d(&input_cat, &self.w1, Some(&self.b1), &device)?;
+        let z1 = manual_conv2d(&input_cat, &self.w1, Some(&self.b1), device)?;
         let a1 = z1.maximum(&z1.affine(0.01, 0.0)?)?;
 
         // Conv2 → output
-        let z2 = manual_conv2d(&a1, &self.w2, Some(&self.b2), &device)?;
+        let z2 = manual_conv2d(&a1, &self.w2, Some(&self.b2), device)?;
         let pred = z2.reshape((b, self.img_dim))?;
 
         let intermediates = vec![input_cat, z1, a1];
@@ -162,7 +162,7 @@ impl DenoisingModel for SimpleDenoisingCNN {
 
         // Conv2 backward
         let db2 = delta_z2.sum(0)?.sum(1)?.sum(1)?;
-        let (delta_a1, dw2) = manual_conv2d_backward(a1, &self.w2, &delta_z2, &device)?;
+        let (delta_a1, dw2) = manual_conv2d_backward(a1, &self.w2, &delta_z2, device)?;
 
         // Leaky-ReLU backward
         let relu_grad = z1.ge(0.0f32)?.to_dtype(DType::F32)?.affine(0.99, 0.01)?;
@@ -171,7 +171,7 @@ impl DenoisingModel for SimpleDenoisingCNN {
         // Conv1 backward
         let db1 = delta_z1.sum(0)?.sum(1)?.sum(1)?;
         let (delta_input_cat, dw1) =
-            manual_conv2d_backward(input_cat, &self.w1, &delta_z1, &device)?;
+            manual_conv2d_backward(input_cat, &self.w1, &delta_z1, device)?;
 
         // Conditioning projection backward
         let delta_cond_map = delta_input_cat.narrow(1, 1, 1)?;

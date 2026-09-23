@@ -273,27 +273,27 @@ impl DenoisingModel for SimpleDenoisingCNN5Layers {
         // --- Step 4: Conv1 + Leaky-ReLU  (2→64 channels, 5×5) --------------
         // z1 = pre-activation (B, 64, 28, 28)
         // a1 = Leaky-ReLU(z1): max(z, 0.01*z)
-        let z1 = manual_conv2d(&input_cat, &self.w1, Some(&self.b1), &device)?;
+        let z1 = manual_conv2d(&input_cat, &self.w1, Some(&self.b1), device)?;
         let a1 = z1.maximum(&z1.affine(0.01, 0.0)?)?;
 
         // --- Step 5: Conv2 + Leaky-ReLU  (64→128 channels, 5×5) ------------
-        let z2 = manual_conv2d(&a1, &self.w2, Some(&self.b2), &device)?;
+        let z2 = manual_conv2d(&a1, &self.w2, Some(&self.b2), device)?;
         let a2 = z2.maximum(&z2.affine(0.01, 0.0)?)?;
 
         // --- Step 6: Conv3 + Leaky-ReLU  (128→128 channels, 5×5) -----------
         // Bottleneck: same channel count in/out; processes at max capacity.
-        let z3 = manual_conv2d(&a2, &self.w3, Some(&self.b3), &device)?;
+        let z3 = manual_conv2d(&a2, &self.w3, Some(&self.b3), device)?;
         let a3 = z3.maximum(&z3.affine(0.01, 0.0)?)?;
 
         // --- Step 7: Conv4 + Leaky-ReLU  (128→64 channels, 5×5) ------------
         // Contracting: halve the channel count, collapsing redundant features.
-        let z4 = manual_conv2d(&a3, &self.w4, Some(&self.b4), &device)?;
+        let z4 = manual_conv2d(&a3, &self.w4, Some(&self.b4), device)?;
         let a4 = z4.maximum(&z4.affine(0.01, 0.0)?)?;
 
         // --- Step 8: Conv5 → output  (64→1 channel, 5×5) -------------------
         // No activation: noise predictions are unbounded real values.
         // z5 shape: (B, 1, 28, 28) → flattened to (B, 784).
-        let z5 = manual_conv2d(&a4, &self.w5, Some(&self.b5), &device)?;
+        let z5 = manual_conv2d(&a4, &self.w5, Some(&self.b5), device)?;
         let pred = z5.reshape((b, self.img_dim))?;
 
         // Cache 9 tensors required by backward().
@@ -367,7 +367,7 @@ impl DenoisingModel for SimpleDenoisingCNN5Layers {
         // db5: sum over B, H, W — bias gradient sums out the spatial axes.
         let db5 = delta_z5.sum(0)?.sum(1)?.sum(1)?;
         // dw5: weight gradient (1, 64, 5, 5); delta_a4: backprop into a4.
-        let (delta_a4, dw5) = manual_conv2d_backward(a4, &self.w5, &delta_z5, &device)?;
+        let (delta_a4, dw5) = manual_conv2d_backward(a4, &self.w5, &delta_z5, device)?;
 
         // --- Leaky-ReLU4 backward -------------------------------------------
         // f'(z4) = 0.99 * (z4>=0) + 0.01 correctly encodes:
@@ -377,7 +377,7 @@ impl DenoisingModel for SimpleDenoisingCNN5Layers {
 
         // --- Conv4 backward: (128→64 channels) ------------------------------
         let db4 = delta_z4.sum(0)?.sum(1)?.sum(1)?;
-        let (delta_a3, dw4) = manual_conv2d_backward(a3, &self.w4, &delta_z4, &device)?;
+        let (delta_a3, dw4) = manual_conv2d_backward(a3, &self.w4, &delta_z4, device)?;
 
         // --- Leaky-ReLU3 backward -------------------------------------------
         let relu_grad3 = z3.ge(0.0f32)?.to_dtype(DType::F32)?.affine(0.99, 0.01)?;
@@ -385,7 +385,7 @@ impl DenoisingModel for SimpleDenoisingCNN5Layers {
 
         // --- Conv3 backward: (128→128 channels, bottleneck) -----------------
         let db3 = delta_z3.sum(0)?.sum(1)?.sum(1)?;
-        let (delta_a2, dw3) = manual_conv2d_backward(a2, &self.w3, &delta_z3, &device)?;
+        let (delta_a2, dw3) = manual_conv2d_backward(a2, &self.w3, &delta_z3, device)?;
 
         // --- Leaky-ReLU2 backward -------------------------------------------
         let relu_grad2 = z2.ge(0.0f32)?.to_dtype(DType::F32)?.affine(0.99, 0.01)?;
@@ -393,7 +393,7 @@ impl DenoisingModel for SimpleDenoisingCNN5Layers {
 
         // --- Conv2 backward: (64→128 channels) ------------------------------
         let db2 = delta_z2.sum(0)?.sum(1)?.sum(1)?;
-        let (delta_a1, dw2) = manual_conv2d_backward(a1, &self.w2, &delta_z2, &device)?;
+        let (delta_a1, dw2) = manual_conv2d_backward(a1, &self.w2, &delta_z2, device)?;
 
         // --- Leaky-ReLU1 backward -------------------------------------------
         let relu_grad1 = z1.ge(0.0f32)?.to_dtype(DType::F32)?.affine(0.99, 0.01)?;
@@ -403,7 +403,7 @@ impl DenoisingModel for SimpleDenoisingCNN5Layers {
         // delta_input_cat: gradient w.r.t. the 2-channel (image + cond) input.
         let db1 = delta_z1.sum(0)?.sum(1)?.sum(1)?;
         let (delta_input_cat, dw1) =
-            manual_conv2d_backward(input_cat, &self.w1, &delta_z1, &device)?;
+            manual_conv2d_backward(input_cat, &self.w1, &delta_z1, device)?;
 
         // --- Conditioning projection backward --------------------------------
         // input_cat has 2 channels: [0]=xt_img, [1]=cond_map.

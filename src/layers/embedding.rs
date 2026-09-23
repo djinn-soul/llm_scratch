@@ -73,6 +73,7 @@ impl TokenEmbedding {
         self.weight.data[ids].clone()
     }
 
+    #[allow(clippy::needless_range_loop)]
     pub fn backward(&mut self, ids: &[usize], d_out: &[Vec<f32>]) {
         // ── BACKWARD: TOKEN EMBEDDING SCATTER ──────────────────────────────
         // Forward copies weight[token_id] into the sequence output.
@@ -86,6 +87,7 @@ impl TokenEmbedding {
         }
     }
 
+    #[allow(clippy::needless_range_loop)]
     pub fn add_transposed_grad(&mut self, d_tied_head: &[Vec<f32>]) {
         // ── BACKWARD: TIED LM HEAD GRADIENT ────────────────────────────────
         // GPT ties the output projection to the token embedding table:
@@ -117,6 +119,7 @@ impl TokenEmbedding {
         }
     }
 
+    #[allow(clippy::needless_range_loop)]
     pub fn transposed_weight(&self) -> Vec<Vec<f32>> {
         // GPT uses tied input/output embeddings:
         //
@@ -167,6 +170,7 @@ impl PositionalEmbedding {
         self.weight.data[ids].clone()
     }
 
+    #[allow(clippy::needless_range_loop)]
     pub fn backward(&mut self, seq_len: usize, d_out: &[Vec<f32>]) {
         // ── BACKWARD: POSITION EMBEDDING SCATTER ───────────────────────────
         // Forward copies weight[position] into the sequence output.

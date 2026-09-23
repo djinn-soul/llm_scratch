@@ -88,9 +88,7 @@ impl BetaScheduler {
         // 1.0: the original clean signal before any noise is added.
         let mut alphas_cumprod_prev_vec = Vec::with_capacity(steps);
         alphas_cumprod_prev_vec.push(1.0f32);
-        for i in 0..(steps - 1) {
-            alphas_cumprod_prev_vec.push(alphas_cumprod_vec[i]);
-        }
+        alphas_cumprod_prev_vec.extend_from_slice(&alphas_cumprod_vec[..steps - 1]);
         let alphas_cumprod_prev = Tensor::new(alphas_cumprod_prev_vec.as_slice(), device)?;
 
         // STEP 5: precompute coefficients for q(x_t | x_0).
@@ -213,9 +211,7 @@ impl BetaScheduler {
 
         let mut alphas_cumprod_prev_vec = Vec::with_capacity(steps);
         alphas_cumprod_prev_vec.push(1.0f32);
-        for i in 0..(steps - 1) {
-            alphas_cumprod_prev_vec.push(alphas_cumprod_vec[i]);
-        }
+        alphas_cumprod_prev_vec.extend_from_slice(&alphas_cumprod_vec[..steps - 1]);
         let alphas_cumprod_prev = Tensor::new(alphas_cumprod_prev_vec.as_slice(), device)?;
 
         let sqrt_alphas_cumprod = alphas_cumprod.sqrt()?;

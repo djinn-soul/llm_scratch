@@ -6,7 +6,7 @@ fn main() {
     let allowed_special = Some(vec!["<|endoftext|>".to_string()]);
 
     let url = "https://raw.githubusercontent.com/rasbt/LLMs-from-scratch/main/ch02/01_main-chapter-code/the-verdict.txt";
-    let _ = download_file_if_not_present(url, "./the-verdict.txt");
+    download_file_if_not_present(url, "./the-verdict.txt");
 
     let text = fs::read_to_string("./the-verdict.txt").expect("Failed to read file");
     println!("BytePair initialized successfully!");
@@ -36,10 +36,7 @@ fn main() {
     println!("Number of token IDs: {}", tokens_with_special.len());
 
     for i in &tokens_with_special {
-        println!(
-            "{}",
-            format!("id: {}--> {}", i, bpe.decode(vec![*i]).unwrap())
-        );
+        println!("id: {}--> {}", i, bpe.decode(vec![*i]).unwrap());
     }
     println!(
         "Decoded: {}",

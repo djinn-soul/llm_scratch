@@ -45,6 +45,7 @@ remain understandable without needing to remember chapter numbers.
 | **2. Latent DiT (VAE + DiT)** | [TODO §28.13](#6-vision-generative--other-domains) | Medium | High | Two-stage training, latent compression, spatial downsampling |
 | **3. MMDiT (Text-to-Image)** | [TODO §28.15](#6-vision-generative--other-domains) | High | Medium | Cross-attention, multimodal conditioning, prompt embeddings |
 | **4. Consistency Models / Distillation** | [TODO §28.16](#6-vision-generative--other-domains) | Very High | High | Single-step inference, knowledge distillation |
+| **5. ControlNet / Spatial Adapters** | [TODO §28.17](#6-vision-generative--other-domains) | Medium | High | Zero-convolutions, spatial conditioning, edge/depth guidance |
 
 ## Status
 
@@ -273,6 +274,7 @@ cargo run --release --bin sample_diffusion_dit -- --mode morph --from 0 --to 3
 | **2. Latent DiT (VAE + DiT)** | Medium | High | Two-stage training, latent compression, spatial downsampling |
 | **3. MMDiT (Text-to-Image)** | High | Medium | Cross-attention, multimodal conditioning, prompt embeddings |
 | **4. Consistency Models / Distillation** | Very High | High | Single-step inference, knowledge distillation |
+| **5. ControlNet / Spatial Adapters** | Medium | High | Zero-convolutions, spatial conditioning, edge/depth guidance |
 
 1. **Flow Matching / Rectified Flow (Stable Diffusion 3, Flux.1, Midjourney v6, OpenAI Sora)**:
    Replaces curved Brownian diffusion paths with straight-line velocity vector fields ($x_t = (1 - t)x_0 + t x_1$). Directly reuses the existing DiT architecture with simplified 10-step Euler ODE numerical integration.
@@ -282,6 +284,8 @@ cargo run --release --bin sample_diffusion_dit -- --mode morph --from 0 --to 3
    Replaces discrete class indices with free-form text embeddings, running joint cross-attention between image patch tokens and text tokens.
 4. **Consistency Distillation**:
    Distills the multistep sampling trajectory into a single-step or two-step real-time generative network.
+5. **ControlNet & Spatial Adapters**:
+   Adds locked base models with zero-initialized trainable side-paths for precision conditioning on depth maps, edge maps, or user strokes.
 
 ## Roadmap
 
@@ -303,12 +307,13 @@ cargo run --release --bin sample_diffusion_dit -- --mode morph --from 0 --to 3
 - [ ] Post-DiT: Latent DiT with VAE ([TODO §28.13](#6-vision-generative--other-domains))
 - [ ] Post-DiT: MMDiT Multi-Modal Text-to-Image ([TODO §28.15](#6-vision-generative--other-domains))
 - [ ] Post-DiT: Consistency Distillation ([TODO §28.16](#6-vision-generative--other-domains))
+- [ ] Post-DiT: ControlNet Spatial Conditioning ([TODO §28.17](#6-vision-generative--other-domains))
 
 ## TODO
 
 | Domain | Section | Key Topics & Milestones | Status |
 | :--- | :--- | :--- | :---: |
-| **1. Modern Frameworks** | [§1](#1-candle--pytorchhf-foundations-modern-frameworks) | Candle, autograd, KV cache, safetensors, quantization | `[ ]` |
+| **1. Modern Frameworks** | [§1](#1-candle--pytorchhf-foundations-modern-frameworks) | Candle, autograd, KV cache, safetensors, quantization | `[/]` |
 | **2. Core Architectures** | [§2](#2-model-architectures--core-implementations) | Transformers, BERT, LLaMA, RoPE, DeepSeek MLA, MoE, Mamba | `[/]` |
 | **3. Fine-Tuning & Alignment** | [§3](#3-fine-tuning-peft--alignment) | SFT, LoRA, PEFT, RLHF (PPO), DPO, KTO, ORPO | `[ ]` |
 | **4. System 2 Reasoning** | [§4](#4-reasoning--system-2-thinking) | Chain of Thought, MCTS, PRM, GRPO | `[ ]` |
@@ -318,14 +323,14 @@ cargo run --release --bin sample_diffusion_dit -- --mode morph --from 0 --to 3
 | **8. Agentic Systems & Tool Use** | [§8](#8-agentic-systems--tool-use) | Tool calling, JSON/XML schemas, ReAct loop | `[ ]` |
 
 ### 1. Candle & PyTorch/HF Foundations (Modern Frameworks)
-- [ ] 1. Rebuild your mini GPT in Candle
-- [ ] 2. Add Candle autograd training
-- [ ] 3. Add Candle generation with top-k/top-p
-- [ ] 4. Add KV cache
-- [ ] 5. Load GPT-2 or small HF model with Candle
-- [ ] 6. Learn safetensors
+- [x] 1. Rebuild your mini GPT in Candle
+- [x] 2. Add Candle autograd training
+- [x] 3. Add Candle generation with top-k/top-p
+- [x] 4. Add KV cache
+- [x] 5. Load GPT-2 or small HF model with Candle
+- [x] 6. Learn safetensors
 - [ ] 7. Learn quantization
-- [ ] 8. Try Burn for training abstraction
+- [x] 8. Try Burn for training abstraction
 - [ ] 9. Build Axum inference API
 - [ ] 10. Learn PyTorch/HF for industry workflows
 
@@ -350,6 +355,8 @@ cargo run --release --bin sample_diffusion_dit -- --mode morph --from 0 --to 3
     - [ ] 13.4 Implement Grouped-Query Attention (GQA) and Multi-Query Attention (MQA)
     - [ ] 13.5 Load pretrained LLaMA-style model weights (e.g., TinyLLaMA) in Rust
     - [ ] 13.6 Implement Low-Rank KV Compression (DeepSeek Multi-Head Latent Attention / MLA)
+    - [ ] 13.7 Implement Multi-Token Prediction (MTP) heads (DeepSeek-V3/R1 style parallel future token prediction)
+    - [ ] 13.8 Implement Sliding Window Attention (SWA) and chunked rolling KV cache (Mistral style)
 - [ ] 14. MoE (Mixture of Experts)
     - [ ] 14.1 Implement router/gating network (top-k routing)
     - [ ] 14.2 Implement multiple feed-forward expert layers
@@ -360,6 +367,7 @@ cargo run --release --bin sample_diffusion_dit -- --mode morph --from 0 --to 3
     - [ ] 14b.1 Implement selective scan algorithm
     - [ ] 14b.2 Implement Mamba block architecture in Candle
     - [ ] 14b.3 Compare generation efficiency against standard Transformers
+    - [ ] 14b.4 Implement Mamba-2 & State Space Duality (SSD) matrix formulation
 
 ### 3. Fine-Tuning, PEFT, & Alignment
 - [ ] 15. Fine-tuning for classification
@@ -389,6 +397,7 @@ cargo run --release --bin sample_diffusion_dit -- --mode morph --from 0 --to 3
     - [ ] 17.3 Create a LoRA linear layer wrapper/helper
     - [ ] 17.4 Freeze pretrained base weights
     - [ ] 17.5 Integrate LoRA weights into forward pass and autograd
+    - [ ] 17.6 Implement QLoRA (NF4 4-bit quantization, double quantization, and paged optimizers)
 - [ ] 18. PEFT (Parameter Efficient Fine Tuning)
     - [ ] 18.1 Explore alternative PEFT methods (Prefix Tuning, Prompt Tuning)
     - [ ] 18.2 Implement unified PEFT adapter manager
@@ -404,6 +413,7 @@ cargo run --release --bin sample_diffusion_dit -- --mode morph --from 0 --to 3
     - [ ] 20.3 Fine-tune the policy model relative to a reference model
     - [ ] 20.4 Implement Kahneman-Tversky Optimization (KTO) for binary preference signals
     - [ ] 20.5 Implement Odds Ratio Preference Optimization (ORPO) without reference models
+    - [ ] 20.6 Implement SimPO (Simple Preference Optimization with length-normalized margin)
 
 ### 4. Reasoning & System 2 Thinking
 - [ ] 21. Reasoning Models (Chain of Thought & RL/Search)
@@ -411,6 +421,8 @@ cargo run --release --bin sample_diffusion_dit -- --mode morph --from 0 --to 3
     - [ ] 21.2 Implement search-based decoding (e.g., MCTS or Beam Search over reasoning steps)
     - [ ] 21.3 Implement Process-supervised Reward Model (PRM)/value network scoring
     - [ ] 21.4 Implement Group Relative Policy Optimization (GRPO) or similar RL loop for reasoning stability
+    - [ ] 21.5 Implement Reinforcement Learning with Verifiable Rewards (RLVR / rule-based reward model for math & code)
+    - [ ] 21.6 Implement Test-Time Compute & Search Scaling (Best-of-N rejection sampling, reasoning token budget forcing)
 
 ### 5. Efficiency & Optimization
 - [ ] 22. FlashAttention & Memory-Efficient Decoding
@@ -419,6 +431,7 @@ cargo run --release --bin sample_diffusion_dit -- --mode morph --from 0 --to 3
     - [ ] 22.3 Compare memory usage and speed against standard attention
     - [ ] 22.4 Implement PagedAttention (vLLM-style paging) to optimize decoding memory
     - [ ] 22.5 Implement INT4 / FP4 KV-cache Quantization to reduce inference footprint
+    - [ ] 22.6 Implement Continuous Batching & Chunked Prefill scheduling for high-throughput serving
 - [ ] 23. Speculative Decoding & Constrained Generation
     - [ ] 23.1 Implement draft model and target model generation loops
     - [ ] 23.2 Implement speculative draft verification logic
@@ -429,6 +442,7 @@ cargo run --release --bin sample_diffusion_dit -- --mode morph --from 0 --to 3
     - [ ] 24.2 Create quantized linear layer forward implementations (e.g., 4-bit / 8-bit)
     - [ ] 24.3 Compare accuracy loss and memory usage profiles
     - [ ] 24.4 Implement Context Window Expansion (YaRN, NTK-aware RoPE Scaling)
+    - [ ] 24.5 Implement AWQ (Activation-aware Weight Quantization) / GPTQ 4-bit weight quantization
 
 ### 6. Vision, Generative & Other Domains
 - [ ] 25. VIT (Vision Transformers) & Multimodal Models
@@ -439,12 +453,14 @@ cargo run --release --bin sample_diffusion_dit -- --mode morph --from 0 --to 3
     - [ ] 25.5 Train and evaluate on toy dataset (e.g., MNIST/CIFAR-10)
     - [ ] 25.6 Implement Multimodal projection layer (linking patch embeddings to text decoder input space)
     - [ ] 25.7 Implement a basic Vision-Language Model (VLM) causal forward pass
+    - [ ] 25.8 Implement CLIP dual-encoder architecture & InfoNCE contrastive pretraining
 - [ ] 26. VAE (Variational Auto Encoder)
     - [ ] 26.1 Implement Encoder network (outputting mean and log variance)
     - [ ] 26.2 Implement Reparameterization trick (sampling epsilon from N(0, I))
     - [ ] 26.3 Implement Decoder network (reconstruct input from latent space)
     - [ ] 26.4 Implement loss function (Reconstruction Loss + KL Divergence)
     - [ ] 26.5 Train and generate synthetic images
+    - [ ] 26.6 Implement VQ-VAE / VQ-GAN (Vector Quantization with discrete codebook & straight-through estimator)
 - [ ] 27. GANs (Generative Adversarial Networks)
     - [ ] 27.1 Implement Generator network
     - [ ] 27.2 Implement Discriminator network
@@ -466,10 +482,14 @@ cargo run --release --bin sample_diffusion_dit -- --mode morph --from 0 --to 3
     - [x] 28.11b Implement DPM-Solver++ (2M) 2nd-order exponential ODE sampler (8–10 steps)
     - [x] 28.11c Implement Adaptive Group Normalization (AdaGN) U-Net architecture (per-layer modulation & direct 1-ch input)
     - [x] 28.12 Implement DiT (Diffusion Transformer) denoiser
+    - [ ] 28.12b Implement Min-SNR weighting & v-prediction parameterization (bridge to velocity fields & zero terminal SNR)
     - [ ] 28.13 Implement latent diffusion (VAE encoder → diffuse in latent space → decode)
     - [ ] 28.14 Implement Flow Matching / Rectified Flow (Euler ODE velocity fields & straight-line transport)
+    - [ ] 28.14b Implement Reflow (straightening ODE trajectories for 2–4 step inference)
     - [ ] 28.15 Implement MMDiT (Multi-Modal Dual-Stream DiT cross-attention for text-to-image)
     - [ ] 28.16 Implement Consistency Models / Distillation (1–2 step real-time generation)
+    - [ ] 28.17 Implement ControlNet / zero-conv conditional adapters for spatial guidance
+    - [ ] 28.18 Generative Evaluation: Implement FID (Fréchet Inception Distance) & CLIP-Score
 
 - [ ] 28b. RAG & Vector Databases
     - [ ] 28b.1 Implement similarity search functions (Cosine, Dot Product)
@@ -500,6 +520,8 @@ cargo run --release --bin sample_diffusion_dit -- --mode morph --from 0 --to 3
     - [ ] 32.1 Implement function signature formatting and system prompt builder
     - [ ] 32.2 Implement JSON/XML tool execution result injection
     - [ ] 32.3 Build a standalone ReAct (Reason-Action-Observation) agent execution loop
+    - [ ] 32.4 Implement Model Context Protocol (MCP) client and server interface
+    - [ ] 32.5 Implement multi-turn agent memory compaction and state persistence
 
 ## Next Step
 

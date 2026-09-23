@@ -14,7 +14,7 @@ pub fn main() {
     // context window=8, heads=2, d_ff=32, and blocks=2.
     let url = "https://raw.githubusercontent.com/rasbt/LLMs-from-scratch/main/ch02/01_main-chapter-code/the-verdict.txt";
     let vocab_size = 1000; // Matches train.rs configuration
-    let _ = download_file_if_not_present(url, "./the-verdict.txt");
+    download_file_if_not_present(url, "./the-verdict.txt");
 
     // Train the same local BPE tokenizer used by the manual training binary.
     // Token ids are only meaningful relative to the tokenizer vocabulary that

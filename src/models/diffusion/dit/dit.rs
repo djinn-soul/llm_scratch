@@ -151,6 +151,20 @@ impl<B: Backend> DiffusionTransformer<B> {
         }
     }
 
+    /// Retrieves the continuous embedding vector for a given discrete class label.
+    ///
+    /// # Parameter Mechanics:
+    /// Queries the learned embedding lookup table of shape `[num_classes, hidden_dim]`.
+    /// Returns a continuous vector `[1, hidden_dim]` that can be manipulated via vector arithmetic
+    /// (e.g. linear blending $\mathbf{e} = (1-\lambda)\mathbf{e}_A + \lambda\mathbf{e}_B$ for Latent Class Morphing).
+    pub fn get_class_embedding(&self, class_id: usize, device: &B::Device) -> Tensor<B, 2> {
+        let label_tensor: Tensor<B, 1, burn::tensor::Int> =
+            Tensor::from_ints([class_id as i32], device);
+        self.class_embed
+            .forward(label_tensor.unsqueeze_dim(1))
+            .reshape([1, self.config.hidden_dim])
+    }
+
     /// Executes the forward pass of DiT to predict the noise added to the image.
     ///
     /// # Detailed Step-by-Step Flow:
@@ -168,21 +182,6 @@ impl<B: Backend> DiffusionTransformer<B> {
     ///    - `x = LayerNorm(x) * (1 + gamma) + beta`
     ///    - Linearly project tokens to raw patch pixels `[B, N, p^2 * C]`
     ///    - Call `unpatchify` to permute and reshape patches back into the 4D image grid `[B, C, H, W]`.
-    /// Retrieves the continuous embedding vector for a given discrete class label.
-    ///
-    /// # Parameter Mechanics:
-    /// Queries the learned embedding lookup table of shape `[num_classes, hidden_dim]`.
-    /// Returns a continuous vector `[1, hidden_dim]` that can be manipulated via vector arithmetic
-    /// (e.g. linear blending $\mathbf{e} = (1-\lambda)\mathbf{e}_A + \lambda\mathbf{e}_B$ for Latent Class Morphing).
-    pub fn get_class_embedding(&self, class_id: usize, device: &B::Device) -> Tensor<B, 2> {
-        let label_tensor: Tensor<B, 1, burn::tensor::Int> =
-            Tensor::from_ints([class_id as i32], device);
-        self.class_embed
-            .forward(label_tensor.unsqueeze_dim(1))
-            .reshape([1, self.config.hidden_dim])
-    }
-
-    /// Executes the forward pass of DiT using an explicit continuous class condition vector `[B, D]`.
     ///
     /// Accepts raw continuous vectors rather than integer IDs, directly supporting CFG extrapolation
     /// and continuous latent morphing between multiple classes.

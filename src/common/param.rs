@@ -36,9 +36,7 @@ impl Param {
         // Gradients accumulate during backprop, so clear them before the next
         // forward/backward training step.
         for row in &mut self.grad {
-            for g in row {
-                *g = 0.0;
-            }
+            row.fill(0.0);
         }
     }
 }

@@ -137,6 +137,7 @@ fn save_cfg_sample(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn save_timestep_reconstruction(
     model: &dyn DenoisingModel,
     scheduler: &BetaScheduler,

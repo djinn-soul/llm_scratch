@@ -54,6 +54,7 @@ use crate::models::diffusion::dit::dit::DiffusionTransformer;
 /// Samples images using continuous condition vectors with Classifier-Free Guidance (CFG).
 ///
 /// Enables both standard discrete sampling and smooth continuous latent space morphing.
+#[allow(clippy::too_many_arguments)]
 pub fn sample_ddim_continuous<B: Backend>(
     model: &DiffusionTransformer<B>,
     scheduler: &SimpleNoiseScheduler,
@@ -123,6 +124,7 @@ pub fn sample_ddim_continuous<B: Backend>(
 }
 
 /// Samples images for a discrete class category using DDIM and Classifier-Free Guidance.
+#[allow(clippy::too_many_arguments)]
 pub fn sample_ddim_with_cfg<B: Backend>(
     model: &DiffusionTransformer<B>,
     scheduler: &SimpleNoiseScheduler,

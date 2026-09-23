@@ -35,6 +35,12 @@ pub enum SeedMethod {
     Substring,
 }
 
+impl Default for SentencePieceTokenizer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SentencePieceTokenizer {
     const MAX_SUBSTR_LEN: usize = 16;
     const SEED_VOCAB_MULTIPLIER: usize = 16;
@@ -90,7 +96,7 @@ impl SentencePieceTokenizer {
             .filter(|(k, _)| k.chars().count() > 1)
             .map(|(k, v)| (k.clone(), *v))
             .collect();
-        mult_substr.sort_by(|a, b| b.1.cmp(&a.1));
+        mult_substr.sort_by_key(|a| std::cmp::Reverse(a.1));
 
         let mut seed: HashMap<String, f64> = HashMap::new();
         for (t, c) in single_chr {

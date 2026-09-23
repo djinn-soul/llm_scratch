@@ -64,14 +64,11 @@ fn group_norm_backward(
 
     let centered_dy = dy.broadcast_sub(&mean_dy)?;
     let variance_term = xh.broadcast_mul(&mean_dy_xhat)?;
-    let dx_grouped = centered_dy.sub(&variance_term)?.broadcast_mul(&inv_std)?;
+    let dx_grouped = centered_dy.sub(&variance_term)?.broadcast_mul(inv_std)?;
 
     Ok(dx_grouped.reshape((b, c, h, w))?)
 }
 
-/// Applies Adaptive Group Normalization (Forward)
-///
-/// Shapes:
 // =============================================================================
 // ADAPTIVE GROUP NORMALIZATION (AdaGN) HELPERS
 // =============================================================================
@@ -213,7 +210,7 @@ impl SimpleDenoisingUNet {
                 img_dim
             );
         }
-        if h % 2 != 0 {
+        if !h.is_multiple_of(2) {
             bail!(
                 "SimpleDenoisingUNet expected an even image side length for 2x2 pooling, got {}",
                 h
@@ -331,7 +328,7 @@ impl DenoisingModel for SimpleDenoisingUNet {
 
         // level 1
 
-        let z1_conv = manual_conv2d(&input_cat, &self.w1, Some(&self.b1), &device)?;
+        let z1_conv = manual_conv2d(&input_cat, &self.w1, Some(&self.b1), device)?;
         let (z1_hat, z1_inv_std) = group_norm_forward(&z1_conv, 4)?;
         let a1 = leaky_relu(&z1_hat)?;
         let a1_down = a1
@@ -340,13 +337,13 @@ impl DenoisingModel for SimpleDenoisingUNet {
             .mean(3)?;
 
         // level 2
-        let z2_conv = manual_conv2d(&a1_down, &self.w2, Some(&self.b2), &device)?;
+        let z2_conv = manual_conv2d(&a1_down, &self.w2, Some(&self.b2), device)?;
         let (z2_hat, z2_inv_std) = group_norm_forward(&z2_conv, 4)?;
         let a2 = leaky_relu(&z2_hat)?;
 
         // Bottleneck residual block: conv3 keeps the same shape as a2.
         // Scaling by 1/sqrt(2) keeps the residual sum variance near the input scale.
-        let z3_conv = manual_conv2d(&a2, &self.w3, Some(&self.b3), &device)?;
+        let z3_conv = manual_conv2d(&a2, &self.w3, Some(&self.b3), device)?;
         let z3_res = z3_conv.add(&a2)?.affine(RESIDUAL_SCALE, 0.0)?;
         let (z3_hat, z3_inv_std) = group_norm_forward(&z3_res, 4)?;
         let a3_pre = leaky_relu(&z3_hat)?;
@@ -383,13 +380,13 @@ impl DenoisingModel for SimpleDenoisingUNet {
 
         let decode_cat = Tensor::cat(&[&a3_up, &a1], 1)?;
         // conv4(B,16,H,W)
-        let z4_conv = manual_conv2d(&decode_cat, &self.w4, Some(&self.b4), &device)?;
+        let z4_conv = manual_conv2d(&decode_cat, &self.w4, Some(&self.b4), device)?;
         let z4_res = z4_conv.add(&a1)?.affine(RESIDUAL_SCALE, 0.0)?;
         let (z4_hat, z4_inv_std) = group_norm_forward(&z4_res, 4)?;
         let a4 = leaky_relu(&z4_hat)?;
 
         // conv5
-        let z5 = manual_conv2d(&a4, &self.w5, Some(&self.b5), &device)?;
+        let z5 = manual_conv2d(&a4, &self.w5, Some(&self.b5), device)?;
         let pred = z5.reshape((b, self.img_dim))?;
         let mut intermediates = vec![
             input_cat, z1_hat, z1_inv_std, a1, a1_down, z2_hat, z2_inv_std, a2, z3_hat, z3_inv_std,
@@ -476,7 +473,7 @@ impl DenoisingModel for SimpleDenoisingUNet {
         // 4. conv4 backward
         let db4 = delta_z4_conv.sum(0)?.sum(1)?.sum(1)?;
         let (delta_decode_cat, dw4) =
-            manual_conv2d_backward(decode_cat, &self.w4, &delta_z4_conv, &device)?;
+            manual_conv2d_backward(decode_cat, &self.w4, &delta_z4_conv, device)?;
 
         //5.  split skip connection gradient
         let delta_a3_up = delta_decode_cat.narrow(1, 0, 32)?.contiguous()?;
@@ -515,7 +512,7 @@ impl DenoisingModel for SimpleDenoisingUNet {
         // 8.botlleneck conv3 backward
         let db3 = delta_z3_conv.sum(0)?.sum(1)?.sum(1)?;
         let (delta_a2_from_conv3, dw3) =
-            manual_conv2d_backward(a2, &self.w3, &delta_z3_conv, &device)?;
+            manual_conv2d_backward(a2, &self.w3, &delta_z3_conv, device)?;
         let delta_a2 = delta_a2_from_conv3.add(&delta_a2_from_bottleneck_residual)?;
 
         // 9. leaky relu backward onz2
@@ -526,7 +523,7 @@ impl DenoisingModel for SimpleDenoisingUNet {
         //10. maxpool backward
         let db2 = delta_z2_norm.sum(0)?.sum(1)?.sum(1)?;
         let (delta_a1_down, dw2) =
-            manual_conv2d_backward(a1_down, &self.w2, &delta_z2_norm, &device)?;
+            manual_conv2d_backward(a1_down, &self.w2, &delta_z2_norm, device)?;
 
         // 11. average pool 2x2 backward(nearest neighbour upsample scaled gradient)
         let scaled_delta = delta_a1_down.affine(0.25, 0.0)?;
@@ -801,7 +798,7 @@ impl DenoisingModel for SimpleDenoisingUNetAdaGN {
 
         // --- LEVEL 1 (28x28) ---
         let xt_img = xt.reshape((b, 1, h, w_img))?;
-        let z1_conv = manual_conv2d(&xt_img, &self.w1, Some(&self.b1), &device)?;
+        let z1_conv = manual_conv2d(&xt_img, &self.w1, Some(&self.b1), device)?;
         let (z1_norm, z1_hat, z1_inv_std) = adagn_forward(&z1_conv, &gamma1, &beta1, 4)?;
         let a1 = leaky_relu(&z1_norm)?;
         let a1_down = a1
@@ -810,12 +807,12 @@ impl DenoisingModel for SimpleDenoisingUNetAdaGN {
             .mean(3)?;
 
         // --- LEVEL 2 (14x14) ---
-        let z2_conv = manual_conv2d(&a1_down, &self.w2, Some(&self.b2), &device)?;
+        let z2_conv = manual_conv2d(&a1_down, &self.w2, Some(&self.b2), device)?;
         let (z2_norm, z2_hat, z2_inv_std) = adagn_forward(&z2_conv, &gamma2, &beta2, 4)?;
         let a2 = leaky_relu(&z2_norm)?;
 
         // --- BOTTLENECK (14x14) ---
-        let z3_conv = manual_conv2d(&a2, &self.w3, Some(&self.b3), &device)?;
+        let z3_conv = manual_conv2d(&a2, &self.w3, Some(&self.b3), device)?;
         let z3_res = z3_conv.add(&a2)?.affine(RESIDUAL_SCALE, 0.0)?;
         let (z3_norm, z3_hat, z3_inv_std) = adagn_forward(&z3_res, &gamma3, &beta3, 4)?;
         let a3_pre = leaky_relu(&z3_norm)?;
@@ -828,13 +825,13 @@ impl DenoisingModel for SimpleDenoisingUNetAdaGN {
             .broadcast_as((b, 32, h_down, 2, w_down, 2))?
             .reshape((b, 32, h, w_img))?;
         let decode_cat = Tensor::cat(&[&a3_up, &a1], 1)?;
-        let z4_conv = manual_conv2d(&decode_cat, &self.w4, Some(&self.b4), &device)?;
+        let z4_conv = manual_conv2d(&decode_cat, &self.w4, Some(&self.b4), device)?;
         let z4_res = z4_conv.add(&a1)?.affine(RESIDUAL_SCALE, 0.0)?;
         let (z4_norm, z4_hat, z4_inv_std) = adagn_forward(&z4_res, &gamma4, &beta4, 4)?;
         let a4 = leaky_relu(&z4_norm)?;
 
         // --- OUTPUT PROJECTION ---
-        let z5 = manual_conv2d(&a4, &self.w5, Some(&self.b5), &device)?;
+        let z5 = manual_conv2d(&a4, &self.w5, Some(&self.b5), device)?;
         let pred = z5.reshape((b, self.img_dim))?;
 
         let mut intermediates = vec![

@@ -63,7 +63,7 @@ fn save_grid_png(path: &str, images_flat: &[f32], rows: usize, cols: usize) -> R
 
     llm_scratch_rs::utils::ensure_parent_dir(path)?;
     let file = File::create(path)?;
-    let ref mut w = BufWriter::new(file);
+    let w = &mut BufWriter::new(file);
 
     let img_h = 28;
     let img_w = 28;
@@ -105,6 +105,7 @@ fn save_grid_png(path: &str, images_flat: &[f32], rows: usize, cols: usize) -> R
 // =============================================================================
 // save_cfg_sample — helper: generate one image at a given guidance scale
 // =============================================================================
+#[allow(clippy::too_many_arguments)]
 fn save_cfg_sample(
     model: &dyn DenoisingModel,
     scheduler: &BetaScheduler,
@@ -138,6 +139,7 @@ fn save_cfg_sample(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn save_fixed_noise_checkpoint(
     model: &dyn DenoisingModel,
     scheduler: &BetaScheduler,
@@ -185,6 +187,7 @@ fn save_fixed_noise_checkpoint(
 // =============================================================================
 // save_cfg_sample_frames — helper: save all 100 frames during reverse sampling
 // =============================================================================
+#[allow(clippy::too_many_arguments)]
 fn save_cfg_sample_frames(
     model: &dyn DenoisingModel,
     scheduler: &BetaScheduler,

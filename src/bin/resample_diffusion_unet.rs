@@ -56,7 +56,7 @@ fn save_grid_png(path: &str, images_flat: &[f32], rows: usize, cols: usize) -> R
     use std::io::BufWriter;
 
     let file = File::create(path)?;
-    let ref mut w = BufWriter::new(file);
+    let w = &mut BufWriter::new(file);
 
     let img_h = 28;
     let img_w = 28;

@@ -44,8 +44,8 @@ fn main() {
     println!("\nFirst token logits (first 5 dimensions):");
     let first_token_logits = &logits[0];
     let print_len = std::cmp::min(first_token_logits.len(), 5);
-    for i in 0..print_len {
-        println!("  logit[{}] = {:.4}", i, first_token_logits[i]);
+    for (i, logit) in first_token_logits.iter().enumerate().take(print_len) {
+        println!("  logit[{}] = {:.4}", i, logit);
     }
 
     // ── PHASE 3: LOSS HELPER SMOKE TEST ───────────────────────────────────

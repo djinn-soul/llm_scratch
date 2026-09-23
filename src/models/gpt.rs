@@ -182,7 +182,7 @@ impl GPT {
         matmul(&x, &lm_head)
     }
 
-    pub fn backward(&mut self, d_logits: &Vec<Vec<f32>>) {
+    pub fn backward(&mut self, d_logits: &[Vec<f32>]) {
         // ── STEP 1: LANGUAGE-MODEL HEAD BACKWARD ──────────────────────────
         // Forward:   logits    = cache_norm @ token_emb.weight^T
         // Backward:  d_norm    = d_logits  @ token_emb.weight

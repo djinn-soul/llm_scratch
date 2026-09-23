@@ -230,7 +230,7 @@ impl SimpleDenoisingMlp {
         // db2 = sum rows of delta2
         //
         // dw2 shape is [out_dim][hidden_dim], matching w2.
-        let dw2 = delta2.t()?.matmul(&a1)?;
+        let dw2 = delta2.t()?.matmul(a1)?;
         let db2 = delta2.sum(0)?;
 
         // LeakyReLU backward: positive z1 gets 1.0, negative z1 gets 0.01.
@@ -257,7 +257,7 @@ impl SimpleDenoisingMlp {
         // db1 = sum rows of delta1
         //
         // dw1 shape is [hidden_dim][in_dim], matching w1.
-        let dw1 = delta1.t()?.matmul(&v)?;
+        let dw1 = delta1.t()?.matmul(v)?;
         let db1 = delta1.sum(0)?;
 
         Ok(Gradients { dw1, db1, dw2, db2 })

@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use anyhow::{bail, Ok, Result};
 use candle_core::{Device, Tensor};
 

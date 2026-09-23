@@ -488,7 +488,7 @@ impl Gpt2Model {
         };
         let wte_weights =
             vb.pp("wte")
-                .get_with_hints((cfg.vocab_size, cfg.n_embd), "weight", init_w.clone())?;
+                .get_with_hints((cfg.vocab_size, cfg.n_embd), "weight", init_w)?;
         let wte = candle_nn::Embedding::new(wte_weights, cfg.n_embd);
 
         let wpe_weights =

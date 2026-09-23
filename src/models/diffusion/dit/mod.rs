@@ -13,6 +13,7 @@
 //! - **Full Pipeline ([`DiffusionTransformer`])**: Stacks positional embeddings, multiple `DiTBlock`s, and final adaLN projections.
 
 pub mod config;
+#[allow(clippy::module_inception)]
 pub mod dit;
 pub mod dit_block;
 pub mod patch_embed;
